@@ -1,0 +1,50 @@
+name: PullRequest
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  buildTest:
+    name: Build SDK and HelloCardboard for Android
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install NDK
+        run: echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653" "cmake;3.22.1"
+
+      - name: Build sdk
+        run: ./gradlew :sdk:assemble
+
+      - name: Build HelloCardboard
+        run: ./gradlew :hellocardboard-android:assembleDebug
+
+      - name: Code checks
+        run: ./gradlew check
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HelloCardboard-debug
+          path: hellocardboard-android/build/outputs/apk/debug/*.apk
+          retention-days: 7
+
+      # ✅ ADD THIS - Upload the Cardboard SDK AAR
+      - name: Upload Cardboard SDK AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardboard-sdk-aar
+          path: sdk/build/outputs/aar/*.aar
+          retention-days: 30
