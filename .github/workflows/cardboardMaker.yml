@@ -1,0 +1,77 @@
+name: Build Cardboard Native Libs
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build all native libs for armeabi-v7a
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install NDK and CMake
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;25.2.9519653" \
+            "cmake;3.22.1"
+
+      # Force armeabi-v7a only to keep output small
+      - name: Patch SDK abiFilters to armeabi-v7a only
+        run: |
+          sed -i "s/abiFilters.*/abiFilters 'armeabi-v7a'/" sdk/build.gradle
+
+      - name: Build Cardboard SDK AAR
+        run: ./gradlew :sdk:assembleRelease
+
+      - name: Extract libcardboard_api.so from AAR
+        run: |
+          mkdir -p app/libraries/jni/armeabi-v7a
+          cp sdk/include/cardboard.h app/libraries/
+          unzip -j sdk/build/outputs/aar/sdk-release.aar \
+            "jni/armeabi-v7a/libGfxPluginCardboard.so" \
+            -d app/libraries/jni/armeabi-v7a/ || true
+          unzip -j sdk/build/outputs/aar/sdk-release.aar \
+            "jni/armeabi-v7a/libcardboard_api.so" \
+            -d app/libraries/jni/armeabi-v7a/ || true
+
+      - name: Build app JNI (libcardboard_jni.so)
+        run: |
+          ./gradlew :hellocardboard-android:externalNativeBuildDebug \
+            -Pandroid.injected.build.abi=armeabi-v7a
+
+      - name: Collect all .so files
+        run: |
+          mkdir -p output/jni/armeabi-v7a
+          # SDK .so
+          cp app/libraries/jni/armeabi-v7a/*.so output/jni/armeabi-v7a/ 2>/dev/null || true
+          # App JNI .so
+          find hellocardboard-android/build/intermediates/cmake \
+            -name "*.so" -path "*/armeabi-v7a/*" \
+            -exec cp {} output/jni/armeabi-v7a/ \;
+
+      - name: Upload SDK AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardboard-sdk-aar
+          path: sdk/build/outputs/aar/sdk-release.aar
+          retention-days: 30
+
+      - name: Upload all native .so files
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardboard-native-libs-armeabi-v7a
+          path: output/
+          retention-days: 30
