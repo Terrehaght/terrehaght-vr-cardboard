@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build all native libs for armeabi-v7a
+    name: Build all native libs for armeabi-v7a and arm64-v8a
     runs-on: ubuntu-latest
 
     steps:
@@ -28,18 +28,16 @@ jobs:
             "ndk;25.2.9519653" \
             "cmake;3.22.1"
 
-      # Force armeabi-v7a only to keep output small
-      - name: Patch SDK abiFilters to armeabi-v7a only
-        run: |
-          sed -i "s/abiFilters.*/abiFilters 'armeabi-v7a'/" sdk/build.gradle
-
       - name: Build Cardboard SDK AAR
         run: ./gradlew :sdk:assembleRelease
 
-      - name: Extract libcardboard_api.so from AAR
+      - name: Extract .so files from SDK AAR
         run: |
           mkdir -p app/libraries/jni/armeabi-v7a
+          mkdir -p app/libraries/jni/arm64-v8a
           cp sdk/include/cardboard.h app/libraries/
+
+          # armeabi-v7a
           unzip -j sdk/build/outputs/aar/sdk-release.aar \
             "jni/armeabi-v7a/libGfxPluginCardboard.so" \
             -d app/libraries/jni/armeabi-v7a/ || true
@@ -47,20 +45,34 @@ jobs:
             "jni/armeabi-v7a/libcardboard_api.so" \
             -d app/libraries/jni/armeabi-v7a/ || true
 
-      - name: Build app JNI (libcardboard_jni.so)
+          # arm64-v8a
+          unzip -j sdk/build/outputs/aar/sdk-release.aar \
+            "jni/arm64-v8a/libGfxPluginCardboard.so" \
+            -d app/libraries/jni/arm64-v8a/ || true
+          unzip -j sdk/build/outputs/aar/sdk-release.aar \
+            "jni/arm64-v8a/libcardboard_api.so" \
+            -d app/libraries/jni/arm64-v8a/ || true
+
+      - name: Build app JNI (.so for both ABIs)
         run: |
           ./gradlew :hellocardboard-android:externalNativeBuildDebug \
-            -Pandroid.injected.build.abi=armeabi-v7a
+            -Pandroid.injected.build.abi=armeabi-v7a,arm64-v8a
 
       - name: Collect all .so files
         run: |
           mkdir -p output/jni/armeabi-v7a
-          # SDK .so
+          mkdir -p output/jni/arm64-v8a
+
+          # SDK .so files
           cp app/libraries/jni/armeabi-v7a/*.so output/jni/armeabi-v7a/ 2>/dev/null || true
-          # App JNI .so
+          cp app/libraries/jni/arm64-v8a/*.so output/jni/arm64-v8a/ 2>/dev/null || true
+
+          # App JNI .so files
           find hellocardboard-android/build/intermediates/cmake \
-            -name "*.so" -path "*/armeabi-v7a/*" \
-            -exec cp {} output/jni/armeabi-v7a/ \;
+            -name "*.so" | while read f; do
+              abi=$(echo "$f" | grep -oP "(armeabi-v7a|arm64-v8a)")
+              [ -n "$abi" ] && cp "$f" "output/jni/$abi/"
+            done
 
       - name: Upload SDK AAR
         uses: actions/upload-artifact@v4
@@ -72,6 +84,6 @@ jobs:
       - name: Upload all native .so files
         uses: actions/upload-artifact@v4
         with:
-          name: cardboard-native-libs-armeabi-v7a
+          name: cardboard-native-libs
           path: output/
           retention-days: 30
