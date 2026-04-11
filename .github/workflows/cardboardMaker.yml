@@ -37,26 +37,27 @@ jobs:
           mkdir -p app/libraries/jni/arm64-v8a
           cp sdk/include/cardboard.h app/libraries/
 
-          # armeabi-v7a
-          unzip -j sdk/build/outputs/aar/sdk-release.aar \
-            "jni/armeabi-v7a/libGfxPluginCardboard.so" \
-            -d app/libraries/jni/armeabi-v7a/ || true
-          unzip -j sdk/build/outputs/aar/sdk-release.aar \
-            "jni/armeabi-v7a/libcardboard_api.so" \
-            -d app/libraries/jni/armeabi-v7a/ || true
+          for abi in armeabi-v7a arm64-v8a; do
+            unzip -j sdk/build/outputs/aar/sdk-release.aar \
+              "jni/$abi/libGfxPluginCardboard.so" \
+              -d app/libraries/jni/$abi/ || true
+            unzip -j sdk/build/outputs/aar/sdk-release.aar \
+              "jni/$abi/libcardboard_api.so" \
+              -d app/libraries/jni/$abi/ || true
+            unzip -j sdk/build/outputs/aar/sdk-release.aar \
+              "jni/$abi/libcardboard_jni.so" \
+              -d app/libraries/jni/$abi/ || true
+          done
 
-          # arm64-v8a
-          unzip -j sdk/build/outputs/aar/sdk-release.aar \
-            "jni/arm64-v8a/libGfxPluginCardboard.so" \
-            -d app/libraries/jni/arm64-v8a/ || true
-          unzip -j sdk/build/outputs/aar/sdk-release.aar \
-            "jni/arm64-v8a/libcardboard_api.so" \
-            -d app/libraries/jni/arm64-v8a/ || true
-
-      - name: Build app JNI (.so for both ABIs)
+      - name: Build app JNI for armeabi-v7a
         run: |
           ./gradlew :hellocardboard-android:externalNativeBuildDebug \
-            -Pandroid.injected.build.abi=armeabi-v7a,arm64-v8a
+            -Pandroid.injected.build.abi=armeabi-v7a
+
+      - name: Build app JNI for arm64-v8a
+        run: |
+          ./gradlew :hellocardboard-android:externalNativeBuildDebug \
+            -Pandroid.injected.build.abi=arm64-v8a
 
       - name: Collect all .so files
         run: |
@@ -73,6 +74,37 @@ jobs:
               abi=$(echo "$f" | grep -oP "(armeabi-v7a|arm64-v8a)")
               [ -n "$abi" ] && cp "$f" "output/jni/$abi/"
             done
+
+      - name: Copy libc++_shared.so from NDK
+        run: |
+          NDK_PATH="$ANDROID_HOME/ndk/25.2.9519653"
+          PREBUILT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
+
+          cp "$PREBUILT/arm-linux-androideabi/libc++_shared.so" \
+            output/jni/armeabi-v7a/
+
+          cp "$PREBUILT/aarch64-linux-android/libc++_shared.so" \
+            output/jni/arm64-v8a/
+
+      - name: Verify all required .so files are present
+        run: |
+          echo "--- Verifying output ---"
+          all_ok=true
+          for abi in armeabi-v7a arm64-v8a; do
+            for lib in libGfxPluginCardboard.so libcardboard_jni.so libc++_shared.so; do
+              if [ -f "output/jni/$abi/$lib" ]; then
+                echo "OK  $abi/$lib"
+              else
+                echo "MISSING  $abi/$lib"
+                all_ok=false
+              fi
+            done
+          done
+          if [ "$all_ok" = false ]; then
+            echo "One or more required .so files are missing. Failing build."
+            exit 1
+          fi
+          echo "All required .so files present."
 
       - name: Upload SDK AAR
         uses: actions/upload-artifact@v4
