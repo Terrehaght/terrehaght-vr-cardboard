@@ -32,8 +32,22 @@
 namespace ndk_hello_cardboard {
 
 /**
- * This is a sample app for the Cardboard SDK. It loads a simple environment and
- * objects that you can click on.
+ * 360-degree image and video viewer built on the Google Cardboard NDK pipeline.
+ *
+ * The entire Cardboard stereo pipeline (GlSetup, UpdateDeviceParams, GetPose,
+ * OnDrawFrame stereo loop, CardboardDistortionRenderer_renderEyeToDisplay,
+ * OnPause/Resume/SwitchViewer) is preserved exactly from the original demo.
+ *
+ * What changed:
+ *   - Replaced DrawRoom / DrawTarget / game objects with DrawSphere().
+ *   - DrawSphere renders a UV sphere from the inside (inverted winding) whose
+ *     texture is either a static equirectangular PNG or an Android
+ *     GL_TEXTURE_EXTERNAL_OES texture fed by a MediaPlayer SurfaceTexture.
+ *   - Three new public methods expose the video path to JNI:
+ *       SetMedia()          – store filename + media-type flag before GL init
+ *       GetVideoTextureId() – create and return the OES texture (GL thread)
+ *       SetSurfaceTexture() – store a global JNI ref to the Java SurfaceTexture
+ *       UpdateVideoTexture()– call surfaceTexture.updateTexImage() via JNI
  */
 class HelloCardboardApp {
  public:
@@ -49,115 +63,94 @@ class HelloCardboardApp {
   ~HelloCardboardApp();
 
   /**
-   * Initializes any GL-related objects. This should be called on the rendering
-   * thread with a valid GL context.
-   *
-   * @param env The JNI environment.
+   * Initialises GL objects (shaders, sphere VBOs, image texture if applicable).
+   * Must be called on the rendering thread with a valid GL context.
    */
   void OnSurfaceCreated(JNIEnv* env);
 
-  /**
-   * Sets screen parameters.
-   *
-   * @param width Screen width
-   * @param height Screen height
-   */
+  /** Sets screen parameters. */
   void SetScreenParams(int width, int height);
 
-  /**
-   * Draws the scene. This should be called on the rendering thread.
-   */
+  /** Renders one stereo frame. Must be called on the rendering thread. */
   void OnDrawFrame();
 
-  /**
-   * Hides the target object if it's being targeted.
-   */
+  /** Touch/trigger event – no-op for the viewer; reserved for future use. */
   void OnTriggerEvent();
 
-  /**
-   * Pauses head tracking.
-   */
+  /** Pauses head tracking. */
   void OnPause();
 
-  /**
-   * Resumes head tracking.
-   */
+  /** Resumes head tracking and forces a device-params refresh. */
   void OnResume();
 
-  /**
-   * Allows user to switch viewer.
-   */
+  /** Opens the QR-code scanner to switch viewer. */
   void SwitchViewer();
 
+  // -------------------------------------------------------------------------
+  // 360 media API (called from JNI, all from the GL thread unless noted)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Stores the asset filename and media-type flag.
+   * Called from Java before OnSurfaceCreated; thread-safe for simple writes.
+   */
+  void SetMedia(const std::string& filename, bool is_video);
+
+  /**
+   * Creates the GL_TEXTURE_EXTERNAL_OES texture that will receive video frames
+   * and returns its texture ID.  Must be called on the GL thread.
+   * Idempotent: returns the existing ID if already created.
+   */
+  GLuint GetVideoTextureId();
+
+  /**
+   * Stores a global JNI reference to the Java SurfaceTexture so that
+   * UpdateVideoTexture() can call updateTexImage() on it.
+   * May be called from any thread that holds a valid JNIEnv.
+   */
+  void SetSurfaceTexture(JNIEnv* env, jobject surface_texture);
+
+  /**
+   * Calls surfaceTexture.updateTexImage() via the stored JNI reference,
+   * pushing the latest decoded video frame into the OES texture.
+   * Must be called on the GL thread (queued via GLSurfaceView.queueEvent).
+   */
+  void UpdateVideoTexture(JNIEnv* env);
+
  private:
-  /**
-   * Default near clip plane z-axis coordinate.
-   */
+  // ---- Cardboard clip planes (unchanged) ----------------------------------
   static constexpr float kZNear = 0.1f;
+  static constexpr float kZFar  = 100.f;
 
-  /**
-   * Default far clip plane z-axis coordinate.
-   */
-  static constexpr float kZFar = 100.f;
+  // ---- Sphere parameters --------------------------------------------------
+  static constexpr float kSphereRadius  = 50.f;   // safely inside kZFar
+  static constexpr int   kSphereSectors = 64;      // longitude slices
+  static constexpr int   kSphereStacks  = 32;      // latitude bands
 
-  /**
-   * Updates device parameters, if necessary.
-   *
-   * @return true if device parameters were successfully updated.
-   */
-  bool UpdateDeviceParams();
-
-  /**
-   * Initializes GL environment.
-   */
-  void GlSetup();
-
-  /**
-   * Deletes GL environment.
-   */
-  void GlTeardown();
-
-  /**
-   * Gets head's pose as a 4x4 matrix.
-   *
-   * @return matrix containing head's pose.
-   */
+  // ---- Cardboard pipeline helpers (unchanged signatures) ------------------
+  bool      UpdateDeviceParams();
+  void      GlSetup();
+  void      GlTeardown();
   Matrix4x4 GetPose();
 
-  /**
-   * Draws all world-space objects for the given eye.
-   */
-  void DrawWorld();
+  // ---- 360 rendering ------------------------------------------------------
+  /** Renders the inside-facing sphere for the current eye's MVP. */
+  void DrawSphere();
 
   /**
-   * Draws the target object.
+   * Procedurally generates a UV sphere (kSphereSectors × kSphereStacks) with
+   * inverted winding so the surface faces inward, and uploads it to VBOs.
    */
-  void DrawTarget();
+  void GenerateSphere(int sectors, int stacks);
 
-  /**
-   * Draws the room.
-   */
-  void DrawRoom();
-
-  /**
-   * Finds a new random position for the target object.
-   */
-  void HideTarget();
-
-  /**
-   * Checks if user is pointing or looking at the target object by calculating
-   * whether the angle between the user's gaze and the vector pointing towards
-   * the object is lower than some threshold.
-   *
-   * @return true if the user is pointing at the target object.
-   */
-  bool IsPointingAtTarget();
-
-  jobject java_asset_mgr_;
+  // ---- JVM / asset manager ------------------------------------------------
+  JavaVM*        java_vm_;
+  jobject        java_asset_mgr_;      // global ref
   AAssetManager* asset_mgr_;
 
-  CardboardHeadTracker* head_tracker_;
-  CardboardLensDistortion* lens_distortion_;
+  // ---- Cardboard pipeline objects (untouched) -----------------------------
+  CardboardHeadTracker*        head_tracker_;
+  CardboardLensDistortion*     lens_distortion_;
   CardboardDistortionRenderer* distortion_renderer_;
 
   CardboardEyeTextureDescription left_eye_texture_description_;
@@ -165,34 +158,49 @@ class HelloCardboardApp {
 
   bool screen_params_changed_;
   bool device_params_changed_;
-  int screen_width_;
-  int screen_height_;
+  int  screen_width_;
+  int  screen_height_;
 
   float projection_matrices_[2][16];
   float eye_matrices_[2][16];
 
-  GLuint depthRenderBuffer_;  // depth buffer
-  GLuint framebuffer_;        // framebuffer object
-  GLuint texture_;            // distortion texture
+  GLuint depthRenderBuffer_;   // depth renderbuffer
+  GLuint framebuffer_;         // offscreen framebuffer
+  GLuint texture_;             // colour attachment / distortion input
 
-  GLuint obj_program_;
-  GLuint obj_position_param_;
-  GLuint obj_uv_param_;
-  GLuint obj_modelview_projection_param_;
-
+  // ---- Per-frame matrices -------------------------------------------------
   Matrix4x4 head_view_;
-  Matrix4x4 model_target_;
+  Matrix4x4 modelview_projection_sphere_;
 
-  Matrix4x4 modelview_projection_target_;
-  Matrix4x4 modelview_projection_room_;
+  // ---- Image shader program (sampler2D) -----------------------------------
+  GLuint img_program_;
+  GLuint img_position_param_;
+  GLuint img_uv_param_;
+  GLuint img_mvp_param_;
 
-  TexturedMesh room_;
-  Texture room_tex_;
+  // ---- OES video shader program (samplerExternalOES) ----------------------
+  GLuint oes_program_;
+  GLuint oes_position_param_;
+  GLuint oes_uv_param_;
+  GLuint oes_mvp_param_;
 
-  std::vector<TexturedMesh> target_object_meshes_;
-  std::vector<Texture> target_object_not_selected_textures_;
-  std::vector<Texture> target_object_selected_textures_;
-  int cur_target_object_;
+  // ---- Sphere geometry VBOs -----------------------------------------------
+  GLuint sphere_vbo_pos_;       // vec3 position per vertex
+  GLuint sphere_vbo_uv_;        // vec2 UV per vertex
+  GLuint sphere_ibo_;           // GLushort index buffer
+  int    sphere_index_count_;   // total index count
+
+  // ---- Image-mode texture -------------------------------------------------
+  Texture sphere_image_tex_;
+
+  // ---- Video-mode OES texture ---------------------------------------------
+  GLuint  video_texture_id_;        // GL_TEXTURE_EXTERNAL_OES texture name
+  jobject surface_texture_ref_;     // global JNI ref to Java SurfaceTexture
+
+  // ---- Media state --------------------------------------------------------
+  std::string media_filename_;      // asset path, e.g. "360/tour.jpg"
+  bool        is_video_;
+  bool        media_initialized_;   // true after image texture is loaded
 };
 
 }  // namespace ndk_hello_cardboard
