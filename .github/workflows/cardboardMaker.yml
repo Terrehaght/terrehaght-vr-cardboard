@@ -64,27 +64,42 @@ jobs:
           mkdir -p output/jni/armeabi-v7a
           mkdir -p output/jni/arm64-v8a
 
-          # SDK .so files
+          # SDK .so files (libGfxPluginCardboard, libcardboard_api, libcardboard_jni)
           cp app/libraries/jni/armeabi-v7a/*.so output/jni/armeabi-v7a/ 2>/dev/null || true
           cp app/libraries/jni/arm64-v8a/*.so output/jni/arm64-v8a/ 2>/dev/null || true
 
-          # App JNI .so files
+          # App JNI .so files from cmake build output.
+          # This also picks up libc++_shared.so produced by the cmake build,
+          # which is the correct version matched to the Cardboard SDK prebuilts.
           find hellocardboard-android/build/intermediates/cmake \
             -name "*.so" | while read f; do
               abi=$(echo "$f" | grep -oP "(armeabi-v7a|arm64-v8a)")
               [ -n "$abi" ] && cp "$f" "output/jni/$abi/"
             done
 
-      - name: Copy libc++_shared.so from NDK
+      - name: Ensure libc++_shared.so is present for both ABIs
+        # Only falls back to the NDK copy if cmake did NOT already produce it.
+        # This avoids overwriting the correctly versioned libc++_shared.so
+        # that the Cardboard SDK prebuilts were compiled against.
         run: |
           NDK_PATH="$ANDROID_HOME/ndk/25.2.9519653"
           PREBUILT="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
 
-          cp "$PREBUILT/arm-linux-androideabi/libc++_shared.so" \
-            output/jni/armeabi-v7a/
+          if [ ! -f "output/jni/armeabi-v7a/libc++_shared.so" ]; then
+            echo "libc++_shared.so missing for armeabi-v7a, copying from NDK..."
+            cp "$PREBUILT/arm-linux-androideabi/libc++_shared.so" \
+              output/jni/armeabi-v7a/
+          else
+            echo "libc++_shared.so already present for armeabi-v7a (from cmake build)"
+          fi
 
-          cp "$PREBUILT/aarch64-linux-android/libc++_shared.so" \
-            output/jni/arm64-v8a/
+          if [ ! -f "output/jni/arm64-v8a/libc++_shared.so" ]; then
+            echo "libc++_shared.so missing for arm64-v8a, copying from NDK..."
+            cp "$PREBUILT/aarch64-linux-android/libc++_shared.so" \
+              output/jni/arm64-v8a/
+          else
+            echo "libc++_shared.so already present for arm64-v8a (from cmake build)"
+          fi
 
       - name: Verify all required .so files are present
         run: |
@@ -93,7 +108,7 @@ jobs:
           for abi in armeabi-v7a arm64-v8a; do
             for lib in libGfxPluginCardboard.so libcardboard_jni.so libc++_shared.so; do
               if [ -f "output/jni/$abi/$lib" ]; then
-                echo "OK  $abi/$lib"
+                echo "OK       $abi/$lib"
               else
                 echo "MISSING  $abi/$lib"
                 all_ok=false
