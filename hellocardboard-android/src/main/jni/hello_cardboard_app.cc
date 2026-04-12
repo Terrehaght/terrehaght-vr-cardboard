@@ -83,6 +83,65 @@ constexpr const char* kOesFragmentShader = R"glsl(
       gl_FragColor = texture2D(u_Texture, vec2(v_UV.x, 1.0 - v_UV.y));
     })glsl";
 
+// ---------------------------------------------------------------------------
+// Helper: build a 4x4 column-major translation matrix stored as float[16]
+// ---------------------------------------------------------------------------
+static inline void MakeTranslation(float tx, float ty, float tz, float out[16]) {
+  // Column-major identity + translation
+  out[ 0]=1; out[ 1]=0; out[ 2]=0; out[ 3]=0;
+  out[ 4]=0; out[ 5]=1; out[ 6]=0; out[ 7]=0;
+  out[ 8]=0; out[ 9]=0; out[10]=1; out[11]=0;
+  out[12]=tx; out[13]=ty; out[14]=tz; out[15]=1;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build a uniform-scale 4x4 matrix stored as float[16]
+// ---------------------------------------------------------------------------
+static inline void MakeScale(float s, float out[16]) {
+  memset(out, 0, 16 * sizeof(float));
+  out[0]=s; out[5]=s; out[10]=s; out[15]=1;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: multiply two column-major 4x4 matrices: result = a * b
+// ---------------------------------------------------------------------------
+static inline void MatMul4x4(const float a[16], const float b[16], float r[16]) {
+  for (int col = 0; col < 4; ++col) {
+    for (int row = 0; row < 4; ++row) {
+      float sum = 0.f;
+      for (int k = 0; k < 4; ++k) {
+        sum += a[k * 4 + row] * b[col * 4 + k];
+      }
+      r[col * 4 + row] = sum;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: normalise a 3-vector in-place; returns the original length.
+// ---------------------------------------------------------------------------
+static inline float Normalize3(float v[3]) {
+  float len = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+  if (len > 1e-6f) { v[0]/=len; v[1]/=len; v[2]/=len; }
+  return len;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: dot product of two 3-vectors.
+// ---------------------------------------------------------------------------
+static inline float Dot3(const float a[3], const float b[3]) {
+  return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+// ---------------------------------------------------------------------------
+// Helper: cross product c = a × b
+// ---------------------------------------------------------------------------
+static inline void Cross3(const float a[3], const float b[3], float c[3]) {
+  c[0] = a[1]*b[2] - a[2]*b[1];
+  c[1] = a[2]*b[0] - a[0]*b[2];
+  c[2] = a[0]*b[1] - a[1]*b[0];
+}
+
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -119,11 +178,18 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       video_texture_id_(0),
       surface_texture_ref_(nullptr),
       is_video_(false),
-      media_initialized_(false) {
+      media_initialized_(false),
+      robot_mode_(RobotMode::ROBOT_FOLLOW),
+      robot_speaking_(false),
+      robot_initialized_(false) {
   JNIEnv* env;
   vm->GetEnv((void**)&env, JNI_VERSION_1_6);
   java_asset_mgr_ = env->NewGlobalRef(asset_mgr_obj);
   asset_mgr_ = AAssetManager_fromJava(env, asset_mgr_obj);
+
+  robot_anchor_position_[0] = 0.f;
+  robot_anchor_position_[1] = 0.f;
+  robot_anchor_position_[2] = -kRobotDistance;
 
   Cardboard_initializeAndroid(vm, obj);
   head_tracker_ = CardboardHeadTracker_create();
@@ -211,7 +277,82 @@ void HelloCardboardApp::UpdateVideoTexture(JNIEnv* env) {
 }
 
 // ---------------------------------------------------------------------------
-// OnSurfaceCreated – build shaders + sphere geometry + image texture
+// Robot guide API
+// ---------------------------------------------------------------------------
+
+void HelloCardboardApp::SetRobotMode(RobotMode mode) {
+  robot_mode_ = mode;
+}
+
+void HelloCardboardApp::SetRobotAnchorPosition() {
+  // Extract camera forward direction from head_view_.
+  // head_view_ is a view matrix: the camera's world-space forward is the
+  // negated third column (or equivalently the third row of the transpose).
+  // In column-major Matrix4x4: column 2 is (m[8], m[9], m[10], m[11]).
+  // The view matrix R|t transforms world→camera; the camera forward in world
+  // space is the inverse rotation applied to (0,0,-1), which is:
+  //   forward_world = -R^T * (0,0,1) = (-R[0][2], -R[1][2], -R[2][2])
+  // In our row-major Matrix4x4 (row i, col j = m[i][j]):
+  //   forward_world = (-m[0][2], -m[1][2], -m[2][2])
+  // We use GetMatrixFromGlArray convention – head_view_.m[row][col].
+
+  float fwd[3] = {
+    -head_view_.m[0][2],
+    -head_view_.m[1][2],
+    -head_view_.m[2][2]
+  };
+  // Normalise (should already be unit length, but be safe).
+  Normalize3(fwd);
+
+  robot_anchor_position_[0] = fwd[0] * kRobotDistance;
+  robot_anchor_position_[1] = fwd[1] * kRobotDistance;
+  robot_anchor_position_[2] = fwd[2] * kRobotDistance;
+}
+
+bool HelloCardboardApp::IsGazingAtRobot() const {
+  if (robot_mode_ == RobotMode::ROBOT_HIDDEN) return false;
+
+  // User's gaze forward vector in world space (negated third column of view).
+  float gaze[3] = {
+    -head_view_.m[0][2],
+    -head_view_.m[1][2],
+    -head_view_.m[2][2]
+  };
+  float gaze_len = sqrtf(gaze[0]*gaze[0] + gaze[1]*gaze[1] + gaze[2]*gaze[2]);
+  if (gaze_len < 1e-6f) return false;
+  gaze[0] /= gaze_len;
+  gaze[1] /= gaze_len;
+  gaze[2] /= gaze_len;
+
+  // Robot's world-space direction from origin (camera stays at origin in
+  // a 360 viewer centred on the sphere).
+  float robot_dir[3] = {
+    robot_anchor_position_[0],
+    robot_anchor_position_[1],
+    robot_anchor_position_[2]
+  };
+  float robot_len = sqrtf(robot_dir[0]*robot_dir[0] +
+                           robot_dir[1]*robot_dir[1] +
+                           robot_dir[2]*robot_dir[2]);
+  if (robot_len < 1e-6f) return false;
+  robot_dir[0] /= robot_len;
+  robot_dir[1] /= robot_len;
+  robot_dir[2] /= robot_len;
+
+  float cos_angle = Dot3(gaze, robot_dir);
+  // Clamp to [-1, 1] to guard against floating-point drift.
+  if (cos_angle >  1.f) cos_angle =  1.f;
+  if (cos_angle < -1.f) cos_angle = -1.f;
+  float angle = acosf(cos_angle);
+  return angle < kGazeThreshold;
+}
+
+void HelloCardboardApp::SetRobotSpeaking(bool speaking) {
+  robot_speaking_ = speaking;
+}
+
+// ---------------------------------------------------------------------------
+// OnSurfaceCreated – build shaders + sphere geometry + image texture + robot
 // ---------------------------------------------------------------------------
 
 void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
@@ -252,21 +393,29 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
     LOGD("360 image loaded: %s", media_filename_.c_str());
   }
 
+  // ---- Robot guide mesh and textures ---------------------------------------
+  // Load QuadSphere.obj (reused as the robot body mesh).
+  bool mesh_ok = robot_mesh_.Initialize(env, java_asset_mgr_,
+                                        "QuadSphere.obj",
+                                        img_position_param_,
+                                        img_uv_param_);
+  bool blue_ok = robot_tex_blue_.Initialize(env, java_asset_mgr_,
+                                            "QuadSphere_Blue_BakedDiffuse.png");
+  bool pink_ok = robot_tex_pink_.Initialize(env, java_asset_mgr_,
+                                            "QuadSphere_Pink_BakedDiffuse.png");
+  if (mesh_ok && blue_ok && pink_ok) {
+    robot_initialized_ = true;
+    LOGD("Robot guide loaded successfully");
+  } else {
+    LOGE("Robot guide load failed: mesh=%d blue=%d pink=%d",
+         (int)mesh_ok, (int)blue_ok, (int)pink_ok);
+  }
+
   CHECKGLERROR("OnSurfaceCreated");
 }
 
 // ---------------------------------------------------------------------------
 // GenerateSphere
-//
-// Produces a UV sphere with:
-//   • kSphereRadius = 50 m (well inside kZFar = 100 m)
-//   • CCW winding ORDER as seen from the INSIDE (= CW from outside)
-//     → back-face culling is disabled during DrawSphere to keep things simple.
-//   • Equirectangular UV mapping:
-//       u = 0 .. 1 mirrored so scanning left-to-right inside matches the image
-//       v = 0 at north pole, 1 at south pole
-//   • A π/2 sector-angle offset aligns u=0.5 (image centre) with the camera's
-//     default forward direction (−Z axis in OpenGL).
 // ---------------------------------------------------------------------------
 
 void HelloCardboardApp::GenerateSphere(int sectors, int stacks) {
@@ -287,12 +436,10 @@ void HelloCardboardApp::GenerateSphere(int sectors, int stacks) {
   for (int i = 0; i <= stacks; ++i) {
     // stackAngle descends from +π/2 (north pole) to −π/2 (south pole)
     float stackAngle = halfPi - i * stackStep;
-    float xzRadius   = R * cosf(stackAngle);   // equatorial radius at this latitude
-    float y          = R * sinf(stackAngle);   // vertical component
+    float xzRadius   = R * cosf(stackAngle);
+    float y          = R * sinf(stackAngle);
 
     for (int j = 0; j <= sectors; ++j) {
-      // Add π/2 so that when j == sectors/2 (u == 0.5, image centre) the
-      // point lands at (x=0, z=−R) which is the camera's −Z forward direction.
       float sectorAngle = j * sectorStep + halfPi;
       float x = xzRadius * cosf(sectorAngle);
       float z = xzRadius * sinf(sectorAngle);
@@ -301,30 +448,23 @@ void HelloCardboardApp::GenerateSphere(int sectors, int stacks) {
       vertices.push_back(y);
       vertices.push_back(z);
 
-      // Mirror U for inside-view: left side of image should be on the left
-      // when you are standing inside the sphere looking forward.
       float u = 1.0f - static_cast<float>(j) / sectors;
-      float v = static_cast<float>(i) / stacks;  // 0=north, 1=south
+      float v = static_cast<float>(i) / stacks;
       uvs.push_back(u);
       uvs.push_back(v);
     }
   }
 
-  // Index generation – CCW as seen from INSIDE (= reversed winding).
-  // Degenerates at the poles are avoided by skipping the upper triangle on
-  // the first row and the lower triangle on the last row.
   for (int i = 0; i < stacks; ++i) {
-    int k1 = i * (sectors + 1);        // first vertex in current stack band
-    int k2 = k1 + sectors + 1;         // first vertex in next stack band
+    int k1 = i * (sectors + 1);
+    int k2 = k1 + sectors + 1;
 
     for (int j = 0; j < sectors; ++j, ++k1, ++k2) {
-      // Upper triangle of the quad (skip the north-pole row)
       if (i != 0) {
         indices.push_back(static_cast<GLushort>(k1));
         indices.push_back(static_cast<GLushort>(k1 + 1));
         indices.push_back(static_cast<GLushort>(k2));
       }
-      // Lower triangle of the quad (skip the south-pole row)
       if (i != stacks - 1) {
         indices.push_back(static_cast<GLushort>(k1 + 1));
         indices.push_back(static_cast<GLushort>(k2 + 1));
@@ -335,21 +475,18 @@ void HelloCardboardApp::GenerateSphere(int sectors, int stacks) {
 
   sphere_index_count_ = static_cast<int>(indices.size());
 
-  // Upload positions
   if (sphere_vbo_pos_ == 0) glGenBuffers(1, &sphere_vbo_pos_);
   glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_pos_);
   glBufferData(GL_ARRAY_BUFFER,
                static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
                vertices.data(), GL_STATIC_DRAW);
 
-  // Upload UVs
   if (sphere_vbo_uv_ == 0) glGenBuffers(1, &sphere_vbo_uv_);
   glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_uv_);
   glBufferData(GL_ARRAY_BUFFER,
                static_cast<GLsizeiptr>(uvs.size() * sizeof(float)),
                uvs.data(), GL_STATIC_DRAW);
 
-  // Upload indices
   if (sphere_ibo_ == 0) glGenBuffers(1, &sphere_ibo_);
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphere_ibo_);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER,
@@ -381,9 +518,67 @@ void HelloCardboardApp::SetScreenParams(int width, int height) {
 void HelloCardboardApp::OnDrawFrame() {
   if (!UpdateDeviceParams()) return;
 
-  // Update head pose.  No floor-height offset for a 360 viewer: the camera
-  // must stay at the exact centre of the sphere at all times.
+  // Update head pose.
   head_view_ = GetPose();
+
+  // In ROBOT_FOLLOW mode, update the robot's world position every frame so it
+  // trails 25° below and 30° right of the current gaze direction.
+  if (robot_mode_ == RobotMode::ROBOT_FOLLOW && robot_initialized_) {
+    // Camera forward in world space (negated third column of view matrix).
+    float fwd[3] = {
+      -head_view_.m[0][2],
+      -head_view_.m[1][2],
+      -head_view_.m[2][2]
+    };
+    Normalize3(fwd);
+
+    // Camera up vector in world space (second column of view matrix).
+    float up[3] = {
+      head_view_.m[0][1],
+      head_view_.m[1][1],
+      head_view_.m[2][1]
+    };
+    Normalize3(up);
+
+    // Camera right vector = forward × up  (left-hand cross for right-hand coords)
+    float right[3];
+    Cross3(fwd, up, right);
+    Normalize3(right);
+
+    // Apply pitch offset (downward from gaze) using Rodrigues' rotation formula.
+    // Rotate fwd around 'right' axis by -kRobotPitchOffsetDeg.
+    const float pitchRad = kRobotPitchOffsetDeg * static_cast<float>(M_PI) / 180.f;
+    const float cp = cosf(-pitchRad), sp = sinf(-pitchRad);
+    float cross_p[3];
+    Cross3(right, fwd, cross_p);
+    float fwd_pitched[3] = {
+      fwd[0]*cp + cross_p[0]*sp + right[0]*Dot3(right, fwd)*(1.f - cp),
+      fwd[1]*cp + cross_p[1]*sp + right[1]*Dot3(right, fwd)*(1.f - cp),
+      fwd[2]*cp + cross_p[2]*sp + right[2]*Dot3(right, fwd)*(1.f - cp)
+    };
+    Normalize3(fwd_pitched);
+
+    // Rebuild up for the pitched forward.
+    float up_pitched[3];
+    Cross3(right, fwd_pitched, up_pitched);
+    Normalize3(up_pitched);
+
+    // Apply yaw offset (rightward) around the pitched-up axis.
+    const float yawRad = kRobotYawOffsetDeg * static_cast<float>(M_PI) / 180.f;
+    const float cy = cosf(yawRad), sy = sinf(yawRad);
+    float cross_y[3];
+    Cross3(up_pitched, fwd_pitched, cross_y);
+    float dir[3] = {
+      fwd_pitched[0]*cy + cross_y[0]*sy + up_pitched[0]*Dot3(up_pitched, fwd_pitched)*(1.f - cy),
+      fwd_pitched[1]*cy + cross_y[1]*sy + up_pitched[1]*Dot3(up_pitched, fwd_pitched)*(1.f - cy),
+      fwd_pitched[2]*cy + cross_y[2]*sy + up_pitched[2]*Dot3(up_pitched, fwd_pitched)*(1.f - cy)
+    };
+    Normalize3(dir);
+
+    robot_anchor_position_[0] = dir[0] * kRobotDistance;
+    robot_anchor_position_[1] = dir[1] * kRobotDistance;
+    robot_anchor_position_[2] = dir[2] * kRobotDistance;
+  }
 
   // Bind the offscreen framebuffer for the stereo render.
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
@@ -392,7 +587,7 @@ void HelloCardboardApp::OnDrawFrame() {
   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  // Draw each eye's view of the sphere.
+  // Draw each eye's view.
   for (int eye = 0; eye < 2; ++eye) {
     glViewport(eye == kLeft ? 0 : screen_width_ / 2, 0,
                screen_width_ / 2, screen_height_);
@@ -405,6 +600,11 @@ void HelloCardboardApp::OnDrawFrame() {
     modelview_projection_sphere_ = proj_matrix * eye_view;
 
     DrawSphere();
+
+    // Draw robot guide after the sphere (per-eye for correct billboard IPD).
+    if (robot_mode_ != RobotMode::ROBOT_HIDDEN && robot_initialized_) {
+      DrawRobotGuide(eye_view, proj_matrix);
+    }
   }
 
   // Lens-distortion composite pass (Cardboard, unchanged).
@@ -423,7 +623,6 @@ void HelloCardboardApp::OnDrawFrame() {
 // ---------------------------------------------------------------------------
 
 void HelloCardboardApp::DrawSphere() {
-  // Select the correct shader program and attribute/uniform locations.
   const GLuint program    = is_video_ ? oes_program_        : img_program_;
   const GLuint pos_param  = is_video_ ? oes_position_param_ : img_position_param_;
   const GLuint uv_param   = is_video_ ? oes_uv_param_       : img_uv_param_;
@@ -431,33 +630,25 @@ void HelloCardboardApp::DrawSphere() {
 
   glUseProgram(program);
 
-  // Upload the combined model-view-projection matrix.
   std::array<float, 16> mvp = modelview_projection_sphere_.ToGlArray();
   glUniformMatrix4fv(mvp_param, 1, GL_FALSE, mvp.data());
 
-  // Bind the texture.
   glActiveTexture(GL_TEXTURE0);
   if (is_video_) {
-    // OES external texture fed by SurfaceTexture / MediaPlayer.
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, video_texture_id_);
   } else {
-    // Standard 2D texture loaded from the asset PNG.
     sphere_image_tex_.Bind();
   }
   glUniform1i(glGetUniformLocation(program, "u_Texture"), 0);
 
-  // Stream vertex positions from the VBO.
   glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_pos_);
   glEnableVertexAttribArray(pos_param);
   glVertexAttribPointer(pos_param, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-  // Stream UV coordinates from the VBO.
   glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_uv_);
   glEnableVertexAttribArray(uv_param);
   glVertexAttribPointer(uv_param, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-  // The sphere has inverted winding for inside rendering.  Disabling face
-  // culling is the simplest way to handle this without duplicating geometry.
   glDisable(GL_CULL_FACE);
 
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphere_ibo_);
@@ -466,7 +657,6 @@ void HelloCardboardApp::DrawSphere() {
 
   glEnable(GL_CULL_FACE);
 
-  // Clean up attribute state.
   glDisableVertexAttribArray(pos_param);
   glDisableVertexAttribArray(uv_param);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -476,12 +666,139 @@ void HelloCardboardApp::DrawSphere() {
 }
 
 // ---------------------------------------------------------------------------
+// DrawRobotGuide
+// ---------------------------------------------------------------------------
+//
+// Renders the robot mesh at robot_anchor_position_ with a billboard transform
+// so it always faces the camera.  Uses img_program_ (sampler2D).
+//
+// The billboard is built per-eye so the slight IPD camera shift is handled
+// correctly in stereo.
+// ---------------------------------------------------------------------------
+
+void HelloCardboardApp::DrawRobotGuide(const Matrix4x4& eye_view,
+                                       const Matrix4x4& proj_matrix) {
+  // ---- Extract camera position in world space from the eye view matrix ----
+  // eye_view = R | t  (view = R*(world - cam_pos)  →  cam_pos = -R^T * t)
+  // Camera position in world space:
+  //   cam_x = -(m[0][0]*m[0][3] + m[1][0]*m[1][3] + m[2][0]*m[2][3])
+  // Using row-major Matrix4x4 m[row][col]:
+  float cam_pos[3] = {
+    -(eye_view.m[0][0]*eye_view.m[0][3] +
+      eye_view.m[1][0]*eye_view.m[1][3] +
+      eye_view.m[2][0]*eye_view.m[2][3]),
+    -(eye_view.m[0][1]*eye_view.m[0][3] +
+      eye_view.m[1][1]*eye_view.m[1][3] +
+      eye_view.m[2][1]*eye_view.m[2][3]),
+    -(eye_view.m[0][2]*eye_view.m[0][3] +
+      eye_view.m[1][2]*eye_view.m[1][3] +
+      eye_view.m[2][2]*eye_view.m[2][3])
+  };
+
+  // Robot position in world space.
+  float rp[3] = {
+    robot_anchor_position_[0],
+    robot_anchor_position_[1],
+    robot_anchor_position_[2]
+  };
+
+  // ---- Build billboard axes -----------------------------------------------
+  // forward = normalise(camera_pos – robot_pos)  (robot faces camera)
+  float fwd[3] = {
+    cam_pos[0] - rp[0],
+    cam_pos[1] - rp[1],
+    cam_pos[2] - rp[2]
+  };
+  Normalize3(fwd);
+
+  // World up hint = (0, 1, 0); fall back to (0, 0, 1) if nearly parallel.
+  float world_up[3] = {0.f, 1.f, 0.f};
+  if (fabsf(Dot3(fwd, world_up)) > 0.99f) {
+    world_up[0] = 0.f; world_up[1] = 0.f; world_up[2] = 1.f;
+  }
+
+  // right = normalise(forward × up)
+  float right[3];
+  Cross3(fwd, world_up, right);
+  Normalize3(right);
+
+  // up = right × forward  (recompute for orthogonality)
+  float up[3];
+  Cross3(right, fwd, up);
+  Normalize3(up);
+
+  // ---- Build model matrix: billboard rotation + translation + scale --------
+  // Column-major layout for GL:
+  //   col0 = right * scale
+  //   col1 = up    * scale
+  //   col2 = fwd   * scale
+  //   col3 = robot_pos (translation)
+
+  // Scale matrix (uniform)
+  float scale_m[16];
+  MakeScale(kRobotScale, scale_m);
+
+  // Rotation matrix (column-major, no scale yet)
+  float rot_m[16] = {
+    right[0], right[1], right[2], 0.f,  // col 0
+    up[0],    up[1],    up[2],    0.f,  // col 1
+    fwd[0],   fwd[1],   fwd[2],  0.f,  // col 2
+    0.f,      0.f,      0.f,     1.f   // col 3
+  };
+
+  // Translation matrix
+  float trans_m[16];
+  MakeTranslation(rp[0], rp[1], rp[2], trans_m);
+
+  // model = trans * rot * scale
+  float rot_scale[16];
+  MatMul4x4(rot_m, scale_m, rot_scale);
+
+  float model_m[16];
+  MatMul4x4(trans_m, rot_scale, model_m);
+
+  // ---- Compute MVP --------------------------------------------------------
+  // eye_view as float[16] (column-major)
+  std::array<float, 16> eye_view_gl = eye_view.ToGlArray();
+  std::array<float, 16> proj_gl     = proj_matrix.ToGlArray();
+
+  // mv = eye_view * model
+  float mv[16];
+  MatMul4x4(eye_view_gl.data(), model_m, mv);
+
+  // mvp = proj * mv
+  float mvp[16];
+  MatMul4x4(proj_gl.data(), mv, mvp);
+
+  // ---- Bind img_program_ and draw the robot mesh --------------------------
+  glUseProgram(img_program_);
+
+  glUniformMatrix4fv(img_mvp_param_, 1, GL_FALSE, mvp);
+
+  // Select texture based on speaking state.
+  glActiveTexture(GL_TEXTURE0);
+  if (robot_speaking_) {
+    robot_tex_pink_.Bind();
+  } else {
+    robot_tex_blue_.Bind();
+  }
+  glUniform1i(glGetUniformLocation(img_program_, "u_Texture"), 0);
+
+  // Enable face culling for the robot (it is a normal outward-facing mesh).
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+
+  robot_mesh_.Draw();
+
+  CHECKGLERROR("DrawRobotGuide");
+}
+
+// ---------------------------------------------------------------------------
 // Trigger event – no-op for the viewer
 // ---------------------------------------------------------------------------
 
 void HelloCardboardApp::OnTriggerEvent() {
-  // Intentionally empty.  The Java layer handles touch events (e.g. back
-  // navigation or play/pause toggling) without going through C++.
+  // Intentionally empty.
 }
 
 // ---------------------------------------------------------------------------

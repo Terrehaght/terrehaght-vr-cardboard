@@ -31,6 +31,26 @@
 
 namespace ndk_hello_cardboard {
 
+// ---------------------------------------------------------------------------
+// Robot guide mode enum
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls how (and whether) the robot guide is positioned and rendered.
+ *
+ *   ROBOT_FOLLOW   – hovers 2 m away, locked 25° below and 30° right of the
+ *                    user's current gaze direction each frame (default).
+ *   ROBOT_ANCHORED – placed once at the world-space position corresponding to
+ *                    the user's gaze direction when SetRobotAnchorPosition() is
+ *                    called; stays there until the mode changes.
+ *   ROBOT_HIDDEN   – draw call is skipped entirely; no geometry, no texture.
+ */
+enum class RobotMode {
+  ROBOT_FOLLOW   = 0,
+  ROBOT_ANCHORED = 1,
+  ROBOT_HIDDEN   = 2,
+};
+
 /**
  * 360-degree image and video viewer built on the Google Cardboard NDK pipeline.
  *
@@ -48,6 +68,8 @@ namespace ndk_hello_cardboard {
  *       GetVideoTextureId() – create and return the OES texture (GL thread)
  *       SetSurfaceTexture() – store a global JNI ref to the Java SurfaceTexture
  *       UpdateVideoTexture()– call surfaceTexture.updateTexImage() via JNI
+ *   - AI-powered robot tour guide (QuadSphere mesh, two textures, billboard
+ *     rendering, gaze detection, speaking-state texture swap).
  */
 class HelloCardboardApp {
  public:
@@ -63,7 +85,8 @@ class HelloCardboardApp {
   ~HelloCardboardApp();
 
   /**
-   * Initialises GL objects (shaders, sphere VBOs, image texture if applicable).
+   * Initialises GL objects (shaders, sphere VBOs, image texture if applicable,
+   * robot mesh and textures).
    * Must be called on the rendering thread with a valid GL context.
    */
   void OnSurfaceCreated(JNIEnv* env);
@@ -117,6 +140,38 @@ class HelloCardboardApp {
    */
   void UpdateVideoTexture(JNIEnv* env);
 
+  // -------------------------------------------------------------------------
+  // Robot guide API (called from JNI)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sets the robot placement / visibility mode.
+   * Thread: GL thread (via glView.queueEvent) or main thread before GL init.
+   */
+  void SetRobotMode(RobotMode mode);
+
+  /**
+   * Projects the head's current forward vector to 2 m and stores it as the
+   * anchored world-space position.  Call this when the user long-presses and
+   * the mode transitions to ROBOT_ANCHORED.
+   * Thread: GL thread (head_view_ is valid here).
+   */
+  void SetRobotAnchorPosition();
+
+  /**
+   * Returns true if the user's gaze vector is within 0.3 radians of the
+   * robot's current world position vector.  Uses the head_view_ from the
+   * most recent GetPose() call — no extra locking needed when called from
+   * the GL thread inside Renderer.onDrawFrame.
+   */
+  bool IsGazingAtRobot() const;
+
+  /**
+   * Switches the robot texture between idle (blue) and speaking (pink).
+   * Thread: GL thread.
+   */
+  void SetRobotSpeaking(bool speaking);
+
  private:
   // ---- Cardboard clip planes (unchanged) ----------------------------------
   static constexpr float kZNear = 0.1f;
@@ -126,6 +181,18 @@ class HelloCardboardApp {
   static constexpr float kSphereRadius  = 50.f;   // safely inside kZFar
   static constexpr int   kSphereSectors = 64;      // longitude slices
   static constexpr int   kSphereStacks  = 32;      // latitude bands
+
+  // ---- Robot parameters ---------------------------------------------------
+  /** Distance from the camera at which the robot hovers, in metres. */
+  static constexpr float kRobotDistance = 2.0f;
+  /** Uniform scale applied to the robot mesh so it appears ~0.35 m tall at 2 m. */
+  static constexpr float kRobotScale    = 0.35f;
+  /** Gaze-detection half-angle threshold in radians (~17°). */
+  static constexpr float kGazeThreshold = 0.3f;
+  /** Degrees below gaze direction at which the robot hovers (follow mode). */
+  static constexpr float kRobotPitchOffsetDeg = 25.0f;
+  /** Degrees to the right of gaze direction at which the robot hovers (follow mode). */
+  static constexpr float kRobotYawOffsetDeg   = 30.0f;
 
   // ---- Cardboard pipeline helpers (unchanged signatures) ------------------
   bool      UpdateDeviceParams();
@@ -142,6 +209,18 @@ class HelloCardboardApp {
    * inverted winding so the surface faces inward, and uploads it to VBOs.
    */
   void GenerateSphere(int sectors, int stacks);
+
+  // ---- Robot rendering ----------------------------------------------------
+  /**
+   * Renders the robot guide for the current eye.
+   *
+   * eye_view    – the combined eye-from-head × head-view matrix for this eye.
+   * proj_matrix – the projection matrix for this eye.
+   *
+   * Must be called after DrawSphere() inside the per-eye loop so the robot
+   * occludes the 360° sphere correctly.
+   */
+  void DrawRobotGuide(const Matrix4x4& eye_view, const Matrix4x4& proj_matrix);
 
   // ---- JVM / asset manager ------------------------------------------------
   JavaVM*        java_vm_;
@@ -201,6 +280,30 @@ class HelloCardboardApp {
   std::string media_filename_;      // asset path, e.g. "360/tour.jpg"
   bool        is_video_;
   bool        media_initialized_;   // true after image texture is loaded
+
+  // ---- Robot guide state --------------------------------------------------
+  /** Mesh loaded from assets/QuadSphere.obj */
+  TexturedMesh robot_mesh_;
+  /** Idle (blue) texture loaded from assets/QuadSphere_Blue_BakedDiffuse.png */
+  Texture      robot_tex_blue_;
+  /** Speaking (pink) texture loaded from assets/QuadSphere_Pink_BakedDiffuse.png */
+  Texture      robot_tex_pink_;
+
+  /** Current placement / visibility mode. */
+  RobotMode robot_mode_;
+
+  /** True while TTS is speaking; selects the pink texture. */
+  bool robot_speaking_;
+
+  /**
+   * World-space position of the robot when in ROBOT_ANCHORED mode.
+   * Set by SetRobotAnchorPosition() from the head's forward vector × 2 m.
+   * [x, y, z]
+   */
+  float robot_anchor_position_[3];
+
+  /** True once the robot mesh and both textures have been loaded on the GL thread. */
+  bool robot_initialized_;
 };
 
 }  // namespace ndk_hello_cardboard
