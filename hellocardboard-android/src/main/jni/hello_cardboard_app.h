@@ -220,7 +220,7 @@ class HelloCardboardApp {
    * Must be called after DrawSphere() inside the per-eye loop so the robot
    * occludes the 360° sphere correctly.
    */
-  void DrawRobotGuide(const Matrix4x4& eye_view, const Matrix4x4& proj_matrix);
+  void DrawRobotGuide(Matrix4x4 eye_view, Matrix4x4 proj_matrix);
 
   // ---- JVM / asset manager ------------------------------------------------
   JavaVM*        java_vm_;

@@ -395,10 +395,10 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
 
   // ---- Robot guide mesh and textures ---------------------------------------
   // Load QuadSphere.obj (reused as the robot body mesh).
-  bool mesh_ok = robot_mesh_.Initialize(env, java_asset_mgr_,
+  bool mesh_ok = robot_mesh_.Initialize(img_position_param_,
+                                        img_uv_param_,
                                         "QuadSphere.obj",
-                                        img_position_param_,
-                                        img_uv_param_);
+                                        asset_mgr_);
   bool blue_ok = robot_tex_blue_.Initialize(env, java_asset_mgr_,
                                             "QuadSphere_Blue_BakedDiffuse.png");
   bool pink_ok = robot_tex_pink_.Initialize(env, java_asset_mgr_,
@@ -676,8 +676,8 @@ void HelloCardboardApp::DrawSphere() {
 // correctly in stereo.
 // ---------------------------------------------------------------------------
 
-void HelloCardboardApp::DrawRobotGuide(const Matrix4x4& eye_view,
-                                       const Matrix4x4& proj_matrix) {
+void HelloCardboardApp::DrawRobotGuide(Matrix4x4 eye_view,
+                                       Matrix4x4 proj_matrix) {
   // ---- Extract camera position in world space from the eye view matrix ----
   // eye_view = R | t  (view = R*(world - cam_pos)  →  cam_pos = -R^T * t)
   // Camera position in world space:
@@ -758,7 +758,6 @@ void HelloCardboardApp::DrawRobotGuide(const Matrix4x4& eye_view,
   MatMul4x4(trans_m, rot_scale, model_m);
 
   // ---- Compute MVP --------------------------------------------------------
-  // eye_view as float[16] (column-major)
   std::array<float, 16> eye_view_gl = eye_view.ToGlArray();
   std::array<float, 16> proj_gl     = proj_matrix.ToGlArray();
 
