@@ -33,7 +33,8 @@ set(CARDBOARD_INCLUDE_DIR ${libs_dir})
 
 # === Cardboard Sample ===
 # Sources
-file(GLOB native_srcs "src/main/jni/*.cc")
+# Sources - looking for both .cc and .cpp
+file(GLOB native_srcs "src/main/jni/*.cc" "src/main/jni/*.cpp")
 # Output binary
 add_library(cardboard_jni SHARED ${native_srcs})
 # Includes

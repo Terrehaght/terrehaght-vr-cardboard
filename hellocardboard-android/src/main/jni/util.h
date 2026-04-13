@@ -146,7 +146,7 @@ class TexturedMesh {
   // @return True if initialization was successful.
   bool Initialize(GLuint position_attrib, GLuint uv_attrib,
                   const std::string& obj_file_path, AAssetManager* asset_mgr);
-
+bool InitializeFromBuffer(const char* buffer, int size, GLuint position_attrib, GLuint uv_attrib);
   // Draws the mesh. The u_MVP uniform should be set before calling this using
   // glUniformMatrix4fv(), and a texture should be bound to GL_TEXTURE0.
   void Draw() const;
