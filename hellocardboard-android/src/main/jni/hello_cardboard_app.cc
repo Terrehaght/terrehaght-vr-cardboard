@@ -397,7 +397,11 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
   }
 
   // ---- Robot guide — FlexieAnimator ----------------------------------------
+  // FIX: Pass env + java_asset_mgr_ first so FlexieAnimator can call
+  //      Texture::Initialize(JNIEnv*, jobject, path) for PNG loading.
   bool flexie_ok = flexie_animator_.Initialize(
+      env,
+      java_asset_mgr_,
       asset_mgr_,
       img_position_param_,
       img_uv_param_,

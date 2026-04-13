@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <jni.h>
 #include <GLES2/gl2.h>
 #include <android/asset_manager.h>
 #include <array>
@@ -25,12 +26,12 @@
 #include <unordered_map>
 #include <vector>
 
-// Forward declarations matching HelloCardboard's TexturedMesh / Texture types.
-// Include the actual headers from your HelloCardboard project before this file.
-// e.g.: #include "textured_mesh.h"  #include "texture.h"
-namespace cardboard { class TexturedMesh; class Texture; }
-using cardboard::TexturedMesh;
-using cardboard::Texture;
+// FIX: Forward-declare TexturedMesh and Texture in the correct namespace.
+// The full definitions live in util.h (ndk_hello_cardboard namespace).
+// Include util.h before this header (or include it here if preferred).
+namespace ndk_hello_cardboard { class TexturedMesh; class Texture; }
+using ndk_hello_cardboard::TexturedMesh;
+using ndk_hello_cardboard::Texture;
 
 namespace flexie {
 
@@ -124,13 +125,20 @@ class FlexieAnimator {
     ~FlexieAnimator();
 
     // Call once after GL context is ready.
+    //
+    // FIX: Added JNIEnv* env and jobject java_asset_mgr so that textures can
+    // be loaded via Texture::Initialize(JNIEnv*, jobject, path), which is the
+    // only Initialize overload provided by util.h.
+    //
     // obj_asset_path : path inside APK assets, e.g. "flexie/QuadSphere_Flexie.obj"
     // pose_asset_path: path inside APK assets, e.g. "flexie/FlexiePose.json"
     // tex_blue_path  : "flexie/flexie_atlas_diffuse_blue.png"
     // tex_pink_path  : "flexie/flexie_atlas_diffuse_pink.png"
-    bool Initialize(AAssetManager* asset_mgr,
-                    GLuint         position_attrib,
-                    GLuint         uv_attrib,
+    bool Initialize(JNIEnv*            env,
+                    jobject            java_asset_mgr,
+                    AAssetManager*     asset_mgr,
+                    GLuint             position_attrib,
+                    GLuint             uv_attrib,
                     const std::string& obj_asset_path,
                     const std::string& pose_asset_path,
                     const std::string& tex_blue_path,

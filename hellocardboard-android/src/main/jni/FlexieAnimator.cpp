@@ -13,10 +13,11 @@
 
 #include "FlexieAnimator.h"
 
-// HelloCardboard headers (adjust include paths to match your project layout)
-#include "textured_mesh.h"
-#include "texture.h"
-#include "util.h"   // CARDBOARD_CHECK / LOG macros
+// FIX: TexturedMesh and Texture are defined in util.h (ndk_hello_cardboard
+// namespace).  There are no separate textured_mesh.h / texture.h files.
+// Removing the two phantom includes and keeping only util.h is all that
+// is needed for the class definitions to be visible here.
+#include "util.h"
 
 #include <android/asset_manager.h>
 #include <android/log.h>
@@ -42,8 +43,13 @@ FlexieAnimator::~FlexieAnimator() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Initialize
+// FIX: Signature extended with JNIEnv* env + jobject java_asset_mgr so that
+//      Texture::Initialize(JNIEnv*, jobject, path) — the only overload in
+//      util.h — can be called correctly.
 // ─────────────────────────────────────────────────────────────────────────────
-bool FlexieAnimator::Initialize(AAssetManager*     asset_mgr,
+bool FlexieAnimator::Initialize(JNIEnv*            env,
+                                jobject            java_asset_mgr,
+                                AAssetManager*     asset_mgr,
                                 GLuint             position_attrib,
                                 GLuint             uv_attrib,
                                 const std::string& obj_asset_path,
@@ -53,14 +59,16 @@ bool FlexieAnimator::Initialize(AAssetManager*     asset_mgr,
     if (initialized_) return true;
 
     // ── Textures ─────────────────────────────────────────────────────────────
+    // FIX: Use Texture::Initialize(JNIEnv*, jobject, path) instead of the
+    //      non-existent Initialize(AAssetManager*, path) overload.
     tex_blue_ = new Texture();
-    if (!tex_blue_->Initialize(asset_mgr, tex_blue_path)) {
+    if (!tex_blue_->Initialize(env, java_asset_mgr, tex_blue_path)) {
         LOGE("Failed to load blue texture: %s", tex_blue_path.c_str());
         return false;
     }
 
     tex_pink_ = new Texture();
-    if (!tex_pink_->Initialize(asset_mgr, tex_pink_path)) {
+    if (!tex_pink_->Initialize(env, java_asset_mgr, tex_pink_path)) {
         LOGE("Failed to load pink texture: %s", tex_pink_path.c_str());
         return false;
     }
@@ -146,8 +154,11 @@ void FlexieAnimator::Draw(const float mvp[16],
 
     glUseProgram(img_program_);
 
+    // FIX: Replace GetTextureId() (which doesn't exist in util.h's Texture
+    //      class) with Bind(), which calls glActiveTexture(GL_TEXTURE0) and
+    //      glBindTexture(GL_TEXTURE_2D, ...) internally — identical effect.
     Texture* active_tex = use_pink_tex ? tex_pink_ : tex_blue_;
-    glBindTexture(GL_TEXTURE_2D, active_tex->GetTextureId());
+    active_tex->Bind();
 
     // Draw in order: torso first (index 1), then children breadth-first
     // The parent-index table guarantees parents always have lower indices
@@ -168,6 +179,11 @@ void FlexieAnimator::Draw(const float mvp[16],
        15
     };
 
+    // Suppress unused-parameter warnings: the attrib locations are baked into
+    // each TexturedMesh at InitializeFromBuffer time, so Draw() needs no args.
+    (void)img_position_param_;
+    (void)img_uv_param_;
+
     for (int di = 0; di < kSegmentCount; ++di) {
         int i = kDrawOrder[di];
         if (i >= static_cast<int>(meshes_.size()) || meshes_[i] == nullptr)
@@ -183,7 +199,10 @@ void FlexieAnimator::Draw(const float mvp[16],
 
         glUniformMatrix4fv(img_mvp_param_, 1, GL_FALSE, final_mvp);
 
-        meshes_[i]->Draw(img_position_param_, img_uv_param_);
+        // FIX: Draw() takes no arguments in util.h — the position and UV
+        //      attribute locations were stored when InitializeFromBuffer was
+        //      called, so passing them again here would not compile.
+        meshes_[i]->Draw();
     }
 }
 
@@ -230,7 +249,7 @@ void FlexieAnimator::ComputeWorldMatrix(int seg_idx, float out_mat[16]) const {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LoadSegmentedOBJ
-// Reads the OBJ asset and populates one TexturedMesh per "g <name>" group.
+// Reads the OBJ asset and populates one TexturedMesh per "g <n>" group.
 // Uses the same AAsset-based path that TexturedMesh::Initialize expects
 // (we feed vertex data directly rather than re-reading asset inside it).
 //
@@ -394,7 +413,7 @@ bool FlexieAnimator::LoadSegmentedOBJ(AAssetManager*     mgr,
         // the sub-OBJ into Android's file cache and open it that way.
         // Alternative: use a variant of TexturedMesh that accepts raw vertex
         // arrays.  Here we use the raw-buffer path:
-        auto* mesh = new TexturedMesh();
+        auto* mesh = new ndk_hello_cardboard::TexturedMesh();
         if (!mesh->InitializeFromBuffer(sub_obj.data(),
                                         static_cast<int>(sub_obj.size()),
                                         pos_attrib, uv_attrib)) {
