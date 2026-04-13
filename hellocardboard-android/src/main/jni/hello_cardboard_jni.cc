@@ -153,67 +153,14 @@ JNI_METHOD(void, nativeSetSurfaceTexture)
  * Calls surfaceTexture.updateTexImage() via JNI, pushing the latest decoded
  * video frame into the OES texture that the sphere shader samples.
  *
+ * This is queued onto the GL thread by the SurfaceTexture.OnFrameAvailableListener
+ * in VrActivity so that updateTexImage() is always called on the correct thread.
+ *
  * Thread: GL thread.
  */
 JNI_METHOD(void, nativeUpdateVideoTexture)
 (JNIEnv* env, jobject /*obj*/, jlong native_app) {
   native(native_app)->UpdateVideoTexture(env);
-}
-
-// ---------------------------------------------------------------------------
-// Robot guide bridge methods
-// ---------------------------------------------------------------------------
-
-/**
- * Sets the robot guide mode.
- *
- * @param mode  0 = ROBOT_FOLLOW, 1 = ROBOT_ANCHORED, 2 = ROBOT_HIDDEN.
- *
- * Thread: GL thread (queued via glView.queueEvent).
- */
-JNI_METHOD(void, nativeSetRobotMode)
-(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jint mode) {
-  ndk_hello_cardboard::RobotMode robot_mode;
-  switch (mode) {
-    case 1:  robot_mode = ndk_hello_cardboard::RobotMode::ROBOT_ANCHORED; break;
-    case 2:  robot_mode = ndk_hello_cardboard::RobotMode::ROBOT_HIDDEN;   break;
-    default: robot_mode = ndk_hello_cardboard::RobotMode::ROBOT_FOLLOW;   break;
-  }
-  native(native_app)->SetRobotMode(robot_mode);
-}
-
-/**
- * Projects the head's current gaze forward vector to 2 m and stores it as
- * the robot's anchored world-space position.
- *
- * Thread: GL thread.
- */
-JNI_METHOD(void, nativeSetRobotAnchorPosition)
-(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app) {
-  native(native_app)->SetRobotAnchorPosition();
-}
-
-/**
- * Returns true if the user is currently gazing at the robot (angle < 0.3 rad).
- *
- * Thread: GL thread (called from Renderer.onDrawFrame – no extra locking
- * needed because head_view_ is only written by GetPose() on the same thread).
- */
-JNI_METHOD(jboolean, nativeIsGazingAtRobot)
-(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app) {
-  return native(native_app)->IsGazingAtRobot() ? JNI_TRUE : JNI_FALSE;
-}
-
-/**
- * Switches the robot texture between idle (blue) and speaking (pink).
- *
- * @param speaking  true while TTS is speaking.
- *
- * Thread: GL thread.
- */
-JNI_METHOD(void, nativeSetRobotSpeaking)
-(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jboolean speaking) {
-  native(native_app)->SetRobotSpeaking(speaking == JNI_TRUE);
 }
 
 }  // extern "C"
