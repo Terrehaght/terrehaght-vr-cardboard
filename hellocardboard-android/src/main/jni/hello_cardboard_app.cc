@@ -22,6 +22,7 @@
 #include <GLES2/gl2ext.h>   // GL_TEXTURE_EXTERNAL_OES, GL_OES_EGL_image_external
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -179,9 +180,7 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       surface_texture_ref_(nullptr),
       is_video_(false),
       media_initialized_(false),
-      robot_mode_(RobotMode::ROBOT_FOLLOW),
-      robot_speaking_(false),
-      robot_initialized_(false) {
+      robot_mode_(RobotMode::ROBOT_FOLLOW) {
   JNIEnv* env;
   vm->GetEnv((void**)&env, JNI_VERSION_1_6);
   java_asset_mgr_ = env->NewGlobalRef(asset_mgr_obj);
@@ -348,7 +347,11 @@ bool HelloCardboardApp::IsGazingAtRobot() const {
 }
 
 void HelloCardboardApp::SetRobotSpeaking(bool speaking) {
-  robot_speaking_ = speaking;
+  if (speaking) {
+    flexie_animator_.BlendToPose("talking", 0.3f);
+  } else {
+    flexie_animator_.BlendToPose("idle", 0.5f);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -393,22 +396,19 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
     LOGD("360 image loaded: %s", media_filename_.c_str());
   }
 
-  // ---- Robot guide mesh and textures ---------------------------------------
-  // Load QuadSphere.obj (reused as the robot body mesh).
-  bool mesh_ok = robot_mesh_.Initialize(img_position_param_,
-                                        img_uv_param_,
-                                        "QuadSphere.obj",
-                                        asset_mgr_);
-  bool blue_ok = robot_tex_blue_.Initialize(env, java_asset_mgr_,
-                                            "QuadSphere_Blue_BakedDiffuse.png");
-  bool pink_ok = robot_tex_pink_.Initialize(env, java_asset_mgr_,
-                                            "QuadSphere_Pink_BakedDiffuse.png");
-  if (mesh_ok && blue_ok && pink_ok) {
-    robot_initialized_ = true;
-    LOGD("Robot guide loaded successfully");
+  // ---- Robot guide — FlexieAnimator ----------------------------------------
+  bool flexie_ok = flexie_animator_.Initialize(
+      asset_mgr_,
+      img_position_param_,
+      img_uv_param_,
+      "flexie/QuadSphere_Flexie.obj",
+      "flexie/FlexiePose.json",
+      "flexie/flexie_atlas_diffuse_blue.png",
+      "flexie/flexie_atlas_diffuse_pink.png");
+  if (flexie_ok) {
+    LOGD("FlexieAnimator loaded successfully");
   } else {
-    LOGE("Robot guide load failed: mesh=%d blue=%d pink=%d",
-         (int)mesh_ok, (int)blue_ok, (int)pink_ok);
+    LOGE("FlexieAnimator load failed");
   }
 
   CHECKGLERROR("OnSurfaceCreated");
@@ -523,7 +523,7 @@ void HelloCardboardApp::OnDrawFrame() {
 
   // In ROBOT_FOLLOW mode, update the robot's world position every frame so it
   // trails 25° below and 30° right of the current gaze direction.
-  if (robot_mode_ == RobotMode::ROBOT_FOLLOW && robot_initialized_) {
+  if (robot_mode_ == RobotMode::ROBOT_FOLLOW) {
     // Camera forward in world space (negated third column of view matrix).
     float fwd[3] = {
       -head_view_.m[0][2],
@@ -602,7 +602,7 @@ void HelloCardboardApp::OnDrawFrame() {
     DrawSphere();
 
     // Draw robot guide after the sphere (per-eye for correct billboard IPD).
-    if (robot_mode_ != RobotMode::ROBOT_HIDDEN && robot_initialized_) {
+    if (robot_mode_ != RobotMode::ROBOT_HIDDEN) {
       DrawRobotGuide(eye_view, proj_matrix);
     }
   }
@@ -669,8 +669,8 @@ void HelloCardboardApp::DrawSphere() {
 // DrawRobotGuide
 // ---------------------------------------------------------------------------
 //
-// Renders the robot mesh at robot_anchor_position_ with a billboard transform
-// so it always faces the camera.  Uses img_program_ (sampler2D).
+// Renders the FlexieAnimator robot at robot_anchor_position_ with a billboard
+// transform so it always faces the camera.  Uses img_program_ (sampler2D).
 //
 // The billboard is built per-eye so the slight IPD camera shift is handled
 // correctly in stereo.
@@ -769,25 +769,22 @@ void HelloCardboardApp::DrawRobotGuide(Matrix4x4 eye_view,
   float mvp[16];
   MatMul4x4(proj_gl.data(), mv, mvp);
 
-  // ---- Bind img_program_ and draw the robot mesh --------------------------
-  glUseProgram(img_program_);
+  // ---- Advance animation and draw via FlexieAnimator ----------------------
 
-  glUniformMatrix4fv(img_mvp_param_, 1, GL_FALSE, mvp);
+  // Compute seconds elapsed since the previous DrawRobotGuide call.
+  static auto last_robot_time = std::chrono::steady_clock::now();
+  auto now = std::chrono::steady_clock::now();
+  float delta = std::chrono::duration<float>(now - last_robot_time).count();
+  last_robot_time = now;
 
-  // Select texture based on speaking state.
-  glActiveTexture(GL_TEXTURE0);
-  if (robot_speaking_) {
-    robot_tex_pink_.Bind();
-  } else {
-    robot_tex_blue_.Bind();
-  }
-  glUniform1i(glGetUniformLocation(img_program_, "u_Texture"), 0);
+  flexie_animator_.Update(delta);
 
-  // Enable face culling for the robot (it is a normal outward-facing mesh).
+  // Enable face culling for the robot (outward-facing mesh segments).
   glEnable(GL_CULL_FACE);
   glCullFace(GL_BACK);
 
-  robot_mesh_.Draw();
+  flexie_animator_.Draw(mvp, img_program_, img_mvp_param_,
+                        img_position_param_, img_uv_param_);
 
   CHECKGLERROR("DrawRobotGuide");
 }

@@ -28,6 +28,7 @@
 #include <GLES2/gl2.h>
 #include "cardboard.h"
 #include "util.h"
+#include "FlexieAnimator.h"
 
 namespace ndk_hello_cardboard {
 
@@ -68,8 +69,8 @@ enum class RobotMode {
  *       GetVideoTextureId() – create and return the OES texture (GL thread)
  *       SetSurfaceTexture() – store a global JNI ref to the Java SurfaceTexture
  *       UpdateVideoTexture()– call surfaceTexture.updateTexImage() via JNI
- *   - AI-powered robot tour guide (QuadSphere mesh, two textures, billboard
- *     rendering, gaze detection, speaking-state texture swap).
+ *   - AI-powered robot tour guide (FlexieAnimator segmented mesh, billboard
+ *     rendering, gaze detection, pose-blend speaking state).
  */
 class HelloCardboardApp {
  public:
@@ -86,7 +87,7 @@ class HelloCardboardApp {
 
   /**
    * Initialises GL objects (shaders, sphere VBOs, image texture if applicable,
-   * robot mesh and textures).
+   * FlexieAnimator segments and textures).
    * Must be called on the rendering thread with a valid GL context.
    */
   void OnSurfaceCreated(JNIEnv* env);
@@ -167,7 +168,7 @@ class HelloCardboardApp {
   bool IsGazingAtRobot() const;
 
   /**
-   * Switches the robot texture between idle (blue) and speaking (pink).
+   * Blends the robot between idle and talking poses.
    * Thread: GL thread.
    */
   void SetRobotSpeaking(bool speaking);
@@ -282,18 +283,11 @@ class HelloCardboardApp {
   bool        media_initialized_;   // true after image texture is loaded
 
   // ---- Robot guide state --------------------------------------------------
-  /** Mesh loaded from assets/QuadSphere.obj */
-  TexturedMesh robot_mesh_;
-  /** Idle (blue) texture loaded from assets/QuadSphere_Blue_BakedDiffuse.png */
-  Texture      robot_tex_blue_;
-  /** Speaking (pink) texture loaded from assets/QuadSphere_Pink_BakedDiffuse.png */
-  Texture      robot_tex_pink_;
+  /** Segmented animated robot (replaces single TexturedMesh + two Textures). */
+  flexie::FlexieAnimator flexie_animator_;
 
   /** Current placement / visibility mode. */
   RobotMode robot_mode_;
-
-  /** True while TTS is speaking; selects the pink texture. */
-  bool robot_speaking_;
 
   /**
    * World-space position of the robot when in ROBOT_ANCHORED mode.
@@ -301,9 +295,6 @@ class HelloCardboardApp {
    * [x, y, z]
    */
   float robot_anchor_position_[3];
-
-  /** True once the robot mesh and both textures have been loaded on the GL thread. */
-  bool robot_initialized_;
 };
 
 }  // namespace ndk_hello_cardboard
