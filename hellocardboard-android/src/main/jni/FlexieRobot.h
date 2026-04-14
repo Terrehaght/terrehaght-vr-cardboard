@@ -131,7 +131,7 @@ class FlexieRobot {
       uniform sampler2D u_Texture;
       varying vec2      v_UV;
       void main() {
-        gl_FragColor = texture2D(u_Texture, v_UV);
+        gl_FragColor = texture2D(u_Texture, vec2(v_UV.x, 1.0 - v_UV.y));
       })glsl";
 
   // ---- Helpers -------------------------------------------------------------
@@ -163,7 +163,7 @@ class FlexieRobot {
   float follow_distance_ = 3.0f;
   float move_speed_      = 1.5f;   // m/s for MOVE_TO
   float follow_speed_    = 2.0f;   // m/s for FOLLOW
-  float scale_           = 0.35f;
+  float scale_           = 1.0f;
 
   // Face the robot toward the camera (yaw only, derived each frame).
   float yaw_deg_         = 0.f;

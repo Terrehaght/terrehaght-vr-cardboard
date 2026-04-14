@@ -199,8 +199,8 @@ void FlexieRobot::Draw(const Matrix4x4& view_proj,
 
     // Enable back-face culling for the solid robot model.
     glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-
+    glDisable(GL_CULL_FACE);
+ 
     mesh_.Draw();
 
     glDisable(GL_CULL_FACE);
