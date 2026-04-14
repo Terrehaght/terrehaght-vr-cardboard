@@ -163,7 +163,7 @@ class FlexieRobot {
   float follow_distance_ = 3.0f;
   float move_speed_      = 1.5f;   // m/s for MOVE_TO
   float follow_speed_    = 2.0f;   // m/s for FOLLOW
-  float scale_           = 1.0f;
+  float scale_           = 0.022f; // BUG 2a FIX: OBJ is in cm; 1.0 = 100x too large
 
   // Face the robot toward the camera (yaw only, derived each frame).
   float yaw_deg_         = 0.f;

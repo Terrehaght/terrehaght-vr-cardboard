@@ -176,6 +176,11 @@ void FlexieRobot::Draw(const Matrix4x4& view_proj,
                         float delta_seconds) {
     if (!initialized_ || mode_ == FlexieMode::HIDDEN) return;
 
+    // BUG 2c FIX: Establish known-good depth state before drawing the robot,
+    // regardless of what DrawSphere() may have left behind.
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+
     UpdatePosition(head_direction, delta_seconds);
 
     Matrix4x4 model  = BuildModelMatrix();
@@ -197,11 +202,14 @@ void FlexieRobot::Draw(const Matrix4x4& view_proj,
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
 
-    // Enable back-face culling for the solid robot model.
+    // BUG 2b FIX: removed the glDisable(GL_CULL_FACE) that immediately
+    // cancelled the enable, making back-face culling a no-op.
     glEnable(GL_CULL_FACE);
-    glDisable(GL_CULL_FACE);
- 
+
     mesh_.Draw();
+
+    // BUG 2c FIX: restore depth-write state after drawing.
+    glDepthMask(GL_TRUE);
 
     glDisable(GL_CULL_FACE);
     CHECKGLERROR("FlexieRobot::Draw");

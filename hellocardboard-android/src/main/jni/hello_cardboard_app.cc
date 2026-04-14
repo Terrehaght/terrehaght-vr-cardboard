@@ -269,6 +269,11 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
     flexie_.Initialize(env, java_asset_mgr_, asset_mgr_);
     last_frame_ns_ = NowNanos();
 
+    // BUG 1 FIX: Mark screen params changed so UpdateDeviceParams() runs on
+    // the very first frame, ensuring GlSetup() is called and the framebuffer
+    // exists before any drawing occurs.
+    screen_params_changed_ = true;
+
     CHECKGLERROR("OnSurfaceCreated");
 }
 
@@ -389,6 +394,7 @@ void HelloCardboardApp::DrawSphere() {
 
     glDisableVertexAttribArray(pos_param);
     glDisableVertexAttribArray(uv_param);
+
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
