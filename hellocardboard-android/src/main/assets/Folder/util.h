@@ -42,8 +42,10 @@ class Matrix4x4 {
   float m[4][4];
 
   // Multiplies two matrices.
-  Matrix4x4 operator*(const Matrix4x4& right) const;
-std::array<float, 4> operator*(const std::array<float, 4>& vec) const;
+  Matrix4x4 operator*(const Matrix4x4& right);
+
+  // Multiplies a matrix with a vector.
+  std::array<float, 4> operator*(const std::array<float, 4>& vec);
 
   // Converts a matrix to an array of floats suitable for passing to OpenGL.
   std::array<float, 16> ToGlArray();
