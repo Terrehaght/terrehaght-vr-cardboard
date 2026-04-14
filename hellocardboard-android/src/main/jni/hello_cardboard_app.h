@@ -1,12 +1,17 @@
 /*
- * hello_cardboard_app.h  (modified – Flexie robot tour-guide integration)
+ * Copyright 2019 Google LLC
  *
- * Changes from original:
- *   + Included FlexieRobot.h
- *   + Added SetFlexieMode / SetFlexiePose / SetFlexieSkin / SetFlexiePosition
- *     public methods (called from new JNI bridge entries).
- *   + Added flexie_robot_ member + last_frame_time_ for delta-time tracking.
- *   + DrawSphere() split from new DrawFlexie() helper.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #ifndef HELLO_CARDBOARD_ANDROID_SRC_MAIN_JNI_HELLO_CARDBOARD_APP_H_
@@ -15,24 +20,43 @@
 #include <android/asset_manager.h>
 #include <jni.h>
 
+#include <array>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include "cardboard.h"
 #include "util.h"
-#include "FlexieRobot.h"   // ← NEW
 
 namespace ndk_hello_cardboard {
 
+// ---------------------------------------------------------------------------
+// SceneObject — a textured .obj mesh placed inside the 360 world.
+// ---------------------------------------------------------------------------
+struct SceneObject {
+  std::string id;        // unique identifier, e.g. "robot_guide"
+  TexturedMesh mesh;
+  Texture texture;
+  Matrix4x4 transform;   // position + rotation + scale baked in
+  bool gaze_interactive; // true → highlights and fires OnTriggerEvent callback
+  bool visible;
+};
+
+// ---------------------------------------------------------------------------
+// HelloCardboardApp
+// ---------------------------------------------------------------------------
 class HelloCardboardApp {
  public:
   HelloCardboardApp(JavaVM* vm, jobject obj, jobject asset_mgr_obj);
   ~HelloCardboardApp();
 
+  // Called on the GL thread once the surface is ready.
   void OnSurfaceCreated(JNIEnv* env);
+
   void SetScreenParams(int width, int height);
   void OnDrawFrame();
   void OnTriggerEvent();
@@ -40,77 +64,72 @@ class HelloCardboardApp {
   void OnResume();
   void SwitchViewer();
 
-  // ---- 360 media API -------------------------------------------------------
-  void  SetMedia(const std::string& filename, bool is_video);
-  GLuint GetVideoTextureId();
-  void  SetSurfaceTexture(JNIEnv* env, jobject surface_texture);
-  void  UpdateVideoTexture(JNIEnv* env);
+  // ---- Media ---------------------------------------------------------------
+  // Called from Java (main thread) via JNI; safe before or after GL init.
+  void SetMedia(JNIEnv* env, const std::string& filename, bool is_video);
 
-  // ---- Flexie robot API (NEW) ----------------------------------------------
+  // Called from GL thread each frame to update the OES video texture.
+  // Returns the OES texture ID so Java can create a SurfaceTexture on it.
+  GLuint GetVideoTextureId() const { return video_texture_id_; }
 
-  /**
-   * Sets the robot behaviour mode.
-   * @param mode  0=ANCHORED, 1=FOLLOW, 2=MOVE_TO, 3=HIDDEN
-   */
-  void SetFlexieMode(int mode);
+  // Java calls this each frame to let C++ call updateTexImage().
+  void UpdateVideoTexture(JNIEnv* env);
 
-  /**
-   * Sets the robot pose/animation.
-   * @param pose  0=IDLE, 1=WAVE, 2=TALKING, 3=POINT, 4=TURN_LEFT, 5=TURN_RIGHT
-   */
-  void SetFlexiePose(int pose);
+  // Store the Java SurfaceTexture object so C++ can call updateTexImage().
+  void SetVideoSurfaceTexture(JNIEnv* env, jobject surface_texture);
 
-  /**
-   * Sets the robot skin.
-   * @param skin  0=BLUE, 1=PINK
-   */
-  void SetFlexieSkin(int skin);
+  // ---- Scene objects -------------------------------------------------------
+  bool AddSceneObject(JNIEnv* env,
+                      const std::string& id,
+                      const std::string& obj_asset,
+                      const std::string& texture_asset,
+                      std::array<float, 3> position,
+                      std::array<float, 3> rotation_deg,
+                      float scale,
+                      bool gaze_interactive);
 
-  /**
-   * Places the robot at explicit world-space coordinates.
-   * In ANCHORED mode the robot snaps there immediately.
-   * In MOVE_TO mode it glides there.
-   */
-  void SetFlexiePosition(float x, float y, float z);
+  void RemoveSceneObject(const std::string& id);
+  void SetSceneObjectVisible(const std::string& id, bool visible);
+  void SetSceneObjectTransform(const std::string& id,
+                               std::array<float, 3> position,
+                               std::array<float, 3> rotation_deg,
+                               float scale);
 
-  /**
-   * Sets the distance the robot maintains in FOLLOW mode (default 3 m).
-   */
-  void SetFlexieFollowDistance(float d);
-
-  /**
-   * Sets the uniform scale of the robot model (default 0.35).
-   */
-  void SetFlexieScale(float s);
+  // ---- JNI callback support ------------------------------------------------
+  // Must be called once after construction so C++ can call back up to Java.
+  void SetJavaActivity(JNIEnv* env, jobject activity);
 
  private:
-  // ---- Cardboard clip planes -----------------------------------------------
   static constexpr float kZNear = 0.1f;
   static constexpr float kZFar  = 100.f;
 
-  // ---- Sphere parameters ---------------------------------------------------
-  static constexpr float kSphereRadius  = 50.f;
-  static constexpr int   kSphereSectors = 64;
-  static constexpr int   kSphereStacks  = 32;
-
-  // ---- Cardboard pipeline helpers ------------------------------------------
-  bool      UpdateDeviceParams();
-  void      GlSetup();
-  void      GlTeardown();
+  bool UpdateDeviceParams();
+  void GlSetup();
+  void GlTeardown();
   Matrix4x4 GetPose();
 
-  // ---- 360 rendering -------------------------------------------------------
-  void DrawSphere();
-  void GenerateSphere(int sectors, int stacks);
+  // Builds the world for one eye.
+  void DrawWorld();
 
-  // ---- JVM / asset manager -------------------------------------------------
-  JavaVM*        java_vm_;
-  jobject        java_asset_mgr_;
+  // 360 sphere (rendered inside-out).
+  void BuildSphereMesh();   // called once on GL thread
+  void DrawSphere();
+
+  // Gaze helpers.
+  bool IsPointingAtObject(const Matrix4x4& model) const;
+  int  GazedObjectIndex() const;  // -1 if none
+
+  // Uniform matrix helpers.
+  Matrix4x4 MakeTransform(std::array<float, 3> position,
+                           std::array<float, 3> rotation_deg,
+                           float scale) const;
+
+  // ---- Cardboard / GL state ------------------------------------------------
+  jobject java_asset_mgr_;
   AAssetManager* asset_mgr_;
 
-  // ---- Cardboard pipeline objects ------------------------------------------
-  CardboardHeadTracker*        head_tracker_;
-  CardboardLensDistortion*     lens_distortion_;
+  CardboardHeadTracker*      head_tracker_;
+  CardboardLensDistortion*   lens_distortion_;
   CardboardDistortionRenderer* distortion_renderer_;
 
   CardboardEyeTextureDescription left_eye_texture_description_;
@@ -126,45 +145,59 @@ class HelloCardboardApp {
 
   GLuint depthRenderBuffer_;
   GLuint framebuffer_;
-  GLuint texture_;
+  GLuint texture_;           // Cardboard render target texture
 
-  // ---- Per-frame matrices --------------------------------------------------
-  Matrix4x4 head_view_;
-  Matrix4x4 modelview_projection_sphere_;
+  // ---- Object shader (shared by scene objects) -----------------------------
+  GLuint obj_program_;
+  GLuint obj_position_param_;
+  GLuint obj_uv_param_;
+  GLuint obj_modelview_projection_param_;
+  GLuint obj_tint_param_;    // u_Tint — highlight multiplier
 
-  // ---- Image shader (sampler2D) --------------------------------------------
-  GLuint img_program_;
-  GLuint img_position_param_;
-  GLuint img_uv_param_;
-  GLuint img_mvp_param_;
+  // ---- Sphere shader (360 background) -------------------------------------
+  // Two variants: one for GL_TEXTURE_2D (image), one for GL_TEXTURE_EXTERNAL_OES (video).
+  GLuint sphere_program_image_;
+  GLuint sphere_program_video_;
+  GLuint sphere_position_param_image_;
+  GLuint sphere_uv_param_image_;
+  GLuint sphere_mvp_param_image_;
+  GLuint sphere_position_param_video_;
+  GLuint sphere_uv_param_video_;
+  GLuint sphere_mvp_param_video_;
 
-  // ---- OES video shader (samplerExternalOES) --------------------------------
-  GLuint oes_program_;
-  GLuint oes_position_param_;
-  GLuint oes_uv_param_;
-  GLuint oes_mvp_param_;
-
-  // ---- Sphere geometry VBOs -----------------------------------------------
-  GLuint sphere_vbo_pos_;
-  GLuint sphere_vbo_uv_;
-  GLuint sphere_ibo_;
-  int    sphere_index_count_;
-
-  // ---- Image-mode texture --------------------------------------------------
-  Texture sphere_image_tex_;
-
-  // ---- Video-mode OES texture ----------------------------------------------
-  GLuint  video_texture_id_;
-  jobject surface_texture_ref_;
+  // Sphere geometry (generated procedurally, 64×32 segments).
+  std::vector<GLfloat>  sphere_vertices_;
+  std::vector<GLfloat>  sphere_uvs_;
+  std::vector<GLushort> sphere_indices_;
+  bool sphere_built_ = false;
 
   // ---- Media state ---------------------------------------------------------
   std::string media_filename_;
-  bool        is_video_;
-  bool        media_initialized_;
+  bool        is_video_         = false;
+  bool        media_dirty_      = false;  // set on main thread, consumed on GL thread
+  std::mutex  media_mutex_;
 
-  // ---- Flexie robot (NEW) --------------------------------------------------
-  FlexieRobot flexie_;
-  int64_t     last_frame_ns_;   // for per-frame delta-time
+  // Image path texture (GL_TEXTURE_2D).
+  Texture image_texture_;
+  bool    image_texture_loaded_ = false;
+
+  // Video OES texture.
+  GLuint   video_texture_id_  = 0;
+  jobject  surface_texture_   = nullptr;  // global ref to Java SurfaceTexture
+  jmethodID update_tex_image_method_ = nullptr;
+  bool     video_texture_ready_ = false;
+
+  // ---- Head / frame matrices -----------------------------------------------
+  Matrix4x4 head_view_;
+  Matrix4x4 modelview_projection_sphere_;  // identity model → full-sphere MVP
+
+  // ---- Scene objects -------------------------------------------------------
+  std::vector<SceneObject> scene_objects_;
+  std::mutex               scene_objects_mutex_;
+
+  // ---- Java callback -------------------------------------------------------
+  jobject    java_activity_   = nullptr;  // global ref
+  jmethodID  on_trigger_method_ = nullptr;
 };
 
 }  // namespace ndk_hello_cardboard

@@ -341,7 +341,7 @@ float VectorDotProduct(const std::array<float, 4>& vec1,
 
 }  // anonymous namespace
 
-Matrix4x4 Matrix4x4::operator*(const Matrix4x4& right) const  {
+Matrix4x4 Matrix4x4::operator*(const Matrix4x4& right) {
   Matrix4x4 result;
   for (int i = 0; i < 4; ++i) {
     for (int j = 0; j < 4; ++j) {
@@ -354,7 +354,7 @@ Matrix4x4 Matrix4x4::operator*(const Matrix4x4& right) const  {
   return result;
 }
 
-std::array<float, 4> Matrix4x4::operator*(const std::array<float, 4>& vec) const  {
+std::array<float, 4> Matrix4x4::operator*(const std::array<float, 4>& vec) {
   std::array<float, 4> result;
   for (int i = 0; i < 4; ++i) {
     result[i] = 0;
