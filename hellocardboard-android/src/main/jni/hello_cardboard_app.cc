@@ -50,7 +50,7 @@ constexpr uint64_t kPredictionTimeWithoutVsyncNanos = 50000000;
 constexpr float kAngleLimit = 0.2f;
 
 // Number of different possible targets
-constexpr int kTargetMeshCount = 3;
+constexpr int kTargetMeshCount = 1;
 
 // Degrees-to-radians conversion.
 constexpr float kDegToRad = static_cast<float>(M_PI) / 180.0f;
@@ -162,18 +162,7 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
       env, java_asset_mgr_, "Icosahedron_Blue_BakedDiffuse.png"));
   HELLOCARDBOARD_CHECK(target_object_selected_textures_[0].Initialize(
       env, java_asset_mgr_, "Icosahedron_Pink_BakedDiffuse.png"));
-  HELLOCARDBOARD_CHECK(target_object_meshes_[1].Initialize(
-      obj_position_param_, obj_uv_param_, "QuadSphere.obj", asset_mgr_));
-  HELLOCARDBOARD_CHECK(target_object_not_selected_textures_[1].Initialize(
-      env, java_asset_mgr_, "QuadSphere_Blue_BakedDiffuse.png"));
-  HELLOCARDBOARD_CHECK(target_object_selected_textures_[1].Initialize(
-      env, java_asset_mgr_, "QuadSphere_Pink_BakedDiffuse.png"));
-  HELLOCARDBOARD_CHECK(target_object_meshes_[2].Initialize(
-      obj_position_param_, obj_uv_param_, "TriSphere.obj", asset_mgr_));
-  HELLOCARDBOARD_CHECK(target_object_not_selected_textures_[2].Initialize(
-      env, java_asset_mgr_, "TriSphere_Blue_BakedDiffuse.png"));
-  HELLOCARDBOARD_CHECK(target_object_selected_textures_[2].Initialize(
-      env, java_asset_mgr_, "TriSphere_Pink_BakedDiffuse.png"));
+  
 
   // Target object first appears directly in front of user.
   model_target_ = GetTranslationMatrix({0.0f, 1.5f, kMinTargetDistance});
