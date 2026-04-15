@@ -20,116 +20,144 @@
 #include <android/asset_manager.h>
 #include <jni.h>
 
-#include <array>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include "cardboard.h"
 #include "util.h"
 
 namespace ndk_hello_cardboard {
 
-// ---------------------------------------------------------------------------
-// SceneObject — a textured .obj mesh placed inside the 360 world.
-// ---------------------------------------------------------------------------
-struct SceneObject {
-  std::string id;        // unique identifier, e.g. "robot_guide"
-  TexturedMesh mesh;
-  Texture texture;
-  Matrix4x4 transform;   // position + rotation + scale baked in
-  bool gaze_interactive; // true → highlights and fires OnTriggerEvent callback
-  bool visible;
-};
-
-// ---------------------------------------------------------------------------
-// HelloCardboardApp
-// ---------------------------------------------------------------------------
+/**
+ * This is a sample app for the Cardboard SDK. It loads a simple environment and
+ * objects that you can click on.
+ */
 class HelloCardboardApp {
  public:
+  /**
+   * Creates a HelloCardboardApp.
+   *
+   * @param vm JavaVM pointer.
+   * @param obj Android activity object.
+   * @param asset_mgr_obj The asset manager object.
+   */
   HelloCardboardApp(JavaVM* vm, jobject obj, jobject asset_mgr_obj);
+
   ~HelloCardboardApp();
 
-  // Called on the GL thread once the surface is ready.
+  /**
+   * Initializes any GL-related objects. This should be called on the rendering
+   * thread with a valid GL context.
+   *
+   * @param env The JNI environment.
+   */
   void OnSurfaceCreated(JNIEnv* env);
 
+  /**
+   * Sets screen parameters.
+   *
+   * @param width Screen width
+   * @param height Screen height
+   */
   void SetScreenParams(int width, int height);
+
+  /**
+   * Draws the scene. This should be called on the rendering thread.
+   */
   void OnDrawFrame();
+
+  /**
+   * Hides the target object if it's being targeted.
+   */
   void OnTriggerEvent();
+
+  /**
+   * Pauses head tracking.
+   */
   void OnPause();
+
+  /**
+   * Resumes head tracking.
+   */
   void OnResume();
+
+  /**
+   * Allows user to switch viewer.
+   */
   void SwitchViewer();
 
-  // ---- Media ---------------------------------------------------------------
-  // Called from Java (main thread) via JNI; safe before or after GL init.
-  void SetMedia(JNIEnv* env, const std::string& filename, bool is_video);
-
-  // Called from GL thread each frame to update the OES video texture.
-  // Returns the OES texture ID so Java can create a SurfaceTexture on it.
-  GLuint GetVideoTextureId() const { return video_texture_id_; }
-
-  // Java calls this each frame to let C++ call updateTexImage().
-  void UpdateVideoTexture(JNIEnv* env);
-
-  // Store the Java SurfaceTexture object so C++ can call updateTexImage().
-  void SetVideoSurfaceTexture(JNIEnv* env, jobject surface_texture);
-
-  // ---- Scene objects -------------------------------------------------------
-  bool AddSceneObject(JNIEnv* env,
-                      const std::string& id,
-                      const std::string& obj_asset,
-                      const std::string& texture_asset,
-                      std::array<float, 3> position,
-                      std::array<float, 3> rotation_deg,
-                      float scale,
-                      bool gaze_interactive);
-
-  void RemoveSceneObject(const std::string& id);
-  void SetSceneObjectVisible(const std::string& id, bool visible);
-  void SetSceneObjectTransform(const std::string& id,
-                               std::array<float, 3> position,
-                               std::array<float, 3> rotation_deg,
-                               float scale);
-
-  // ---- JNI callback support ------------------------------------------------
-  // Must be called once after construction so C++ can call back up to Java.
-  void SetJavaActivity(JNIEnv* env, jobject activity);
-
  private:
+  /**
+   * Default near clip plane z-axis coordinate.
+   */
   static constexpr float kZNear = 0.1f;
-  static constexpr float kZFar  = 100.f;
 
+  /**
+   * Default far clip plane z-axis coordinate.
+   */
+  static constexpr float kZFar = 100.f;
+
+  /**
+   * Updates device parameters, if necessary.
+   *
+   * @return true if device parameters were successfully updated.
+   */
   bool UpdateDeviceParams();
+
+  /**
+   * Initializes GL environment.
+   */
   void GlSetup();
+
+  /**
+   * Deletes GL environment.
+   */
   void GlTeardown();
+
+  /**
+   * Gets head's pose as a 4x4 matrix.
+   *
+   * @return matrix containing head's pose.
+   */
   Matrix4x4 GetPose();
 
-  // Builds the world for one eye.
+  /**
+   * Draws all world-space objects for the given eye.
+   */
   void DrawWorld();
 
-  // 360 sphere (rendered inside-out).
-  void BuildSphereMesh();   // called once on GL thread
-  void DrawSphere();
+  /**
+   * Draws the target object.
+   */
+  void DrawTarget();
 
-  // Gaze helpers.
-  bool IsPointingAtObject(const Matrix4x4& model) const;
-  int  GazedObjectIndex() const;  // -1 if none
+  /**
+   * Draws the room.
+   */
+  void DrawRoom();
 
-  // Uniform matrix helpers.
-  Matrix4x4 MakeTransform(std::array<float, 3> position,
-                           std::array<float, 3> rotation_deg,
-                           float scale) const;
+  /**
+   * Finds a new random position for the target object.
+   */
+  void HideTarget();
 
-  // ---- Cardboard / GL state ------------------------------------------------
+  /**
+   * Checks if user is pointing or looking at the target object by calculating
+   * whether the angle between the user's gaze and the vector pointing towards
+   * the object is lower than some threshold.
+   *
+   * @return true if the user is pointing at the target object.
+   */
+  bool IsPointingAtTarget();
+
   jobject java_asset_mgr_;
   AAssetManager* asset_mgr_;
 
-  CardboardHeadTracker*      head_tracker_;
-  CardboardLensDistortion*   lens_distortion_;
+  CardboardHeadTracker* head_tracker_;
+  CardboardLensDistortion* lens_distortion_;
   CardboardDistortionRenderer* distortion_renderer_;
 
   CardboardEyeTextureDescription left_eye_texture_description_;
@@ -137,67 +165,34 @@ class HelloCardboardApp {
 
   bool screen_params_changed_;
   bool device_params_changed_;
-  int  screen_width_;
-  int  screen_height_;
+  int screen_width_;
+  int screen_height_;
 
   float projection_matrices_[2][16];
   float eye_matrices_[2][16];
 
-  GLuint depthRenderBuffer_;
-  GLuint framebuffer_;
-  GLuint texture_;           // Cardboard render target texture
+  GLuint depthRenderBuffer_;  // depth buffer
+  GLuint framebuffer_;        // framebuffer object
+  GLuint texture_;            // distortion texture
 
-  // ---- Object shader (shared by scene objects) -----------------------------
   GLuint obj_program_;
   GLuint obj_position_param_;
   GLuint obj_uv_param_;
   GLuint obj_modelview_projection_param_;
-  GLuint obj_tint_param_;    // u_Tint — highlight multiplier
 
-  // ---- Sphere shader (360 background) -------------------------------------
-  // Two variants: one for GL_TEXTURE_2D (image), one for GL_TEXTURE_EXTERNAL_OES (video).
-  GLuint sphere_program_image_;
-  GLuint sphere_program_video_;
-  GLuint sphere_position_param_image_;
-  GLuint sphere_uv_param_image_;
-  GLuint sphere_mvp_param_image_;
-  GLuint sphere_position_param_video_;
-  GLuint sphere_uv_param_video_;
-  GLuint sphere_mvp_param_video_;
-
-  // Sphere geometry (generated procedurally, 64×32 segments).
-  std::vector<GLfloat>  sphere_vertices_;
-  std::vector<GLfloat>  sphere_uvs_;
-  std::vector<GLushort> sphere_indices_;
-  bool sphere_built_ = false;
-
-  // ---- Media state ---------------------------------------------------------
-  std::string media_filename_;
-  bool        is_video_         = false;
-  bool        media_dirty_      = false;  // set on main thread, consumed on GL thread
-  std::mutex  media_mutex_;
-
-  // Image path texture (GL_TEXTURE_2D).
-  Texture image_texture_;
-  bool    image_texture_loaded_ = false;
-
-  // Video OES texture.
-  GLuint   video_texture_id_  = 0;
-  jobject  surface_texture_   = nullptr;  // global ref to Java SurfaceTexture
-  jmethodID update_tex_image_method_ = nullptr;
-  bool     video_texture_ready_ = false;
-
-  // ---- Head / frame matrices -----------------------------------------------
   Matrix4x4 head_view_;
-  Matrix4x4 modelview_projection_sphere_;  // identity model → full-sphere MVP
+  Matrix4x4 model_target_;
 
-  // ---- Scene objects -------------------------------------------------------
-  std::vector<SceneObject> scene_objects_;
-  std::mutex               scene_objects_mutex_;
+  Matrix4x4 modelview_projection_target_;
+  Matrix4x4 modelview_projection_room_;
 
-  // ---- Java callback -------------------------------------------------------
-  jobject    java_activity_   = nullptr;  // global ref
-  jmethodID  on_trigger_method_ = nullptr;
+  TexturedMesh room_;
+  Texture room_tex_;
+
+  std::vector<TexturedMesh> target_object_meshes_;
+  std::vector<Texture> target_object_not_selected_textures_;
+  std::vector<Texture> target_object_selected_textures_;
+  int cur_target_object_;
 };
 
 }  // namespace ndk_hello_cardboard
