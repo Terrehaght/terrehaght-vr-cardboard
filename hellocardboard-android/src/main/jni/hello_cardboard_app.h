@@ -34,6 +34,13 @@ namespace ndk_hello_cardboard {
 /**
  * This is a sample app for the Cardboard SDK. It loads a simple environment and
  * objects that you can click on.
+ *
+ * It supports two rendering modes:
+ *   - VR Mode (default): Uses CardboardHeadTracker for head pose, renders
+ *     split-screen with lens distortion for use inside a Cardboard headset.
+ *   - Finger Mode: Uses touch drag input for camera control (yaw/pitch),
+ *     renders a single full-screen view with no lens distortion. Designed for
+ *     devices without a gyroscope sensor.
  */
 class HelloCardboardApp {
  public:
@@ -89,6 +96,26 @@ class HelloCardboardApp {
    */
   void SwitchViewer();
 
+  /**
+   * Enables or disables finger (touch drag) mode.
+   *
+   * In finger mode the Cardboard head tracker is paused, lens distortion and
+   * split-screen rendering are disabled, and the camera orientation is driven
+   * entirely by accumulated touch drag deltas.
+   *
+   * @param enabled true to activate finger mode, false to return to VR mode.
+   */
+  void SetFingerMode(bool enabled);
+
+  /**
+   * Applies an incremental touch drag to update the camera orientation.
+   * Only has an effect when finger mode is active.
+   *
+   * @param dx Horizontal drag delta in pixels (positive = drag right).
+   * @param dy Vertical drag delta in pixels (positive = drag down).
+   */
+  void OnTouchDrag(float dx, float dy);
+
  private:
   /**
    * Default near clip plane z-axis coordinate.
@@ -99,6 +126,17 @@ class HelloCardboardApp {
    * Default far clip plane z-axis coordinate.
    */
   static constexpr float kZFar = 100.f;
+
+  /**
+   * Sensitivity scalar: degrees of rotation per pixel of drag.
+   * Tune this value to taste (0.15 feels natural on most screen sizes).
+   */
+  static constexpr float kTouchRotationDegPerPixel = 0.15f;
+
+  /**
+   * Maximum pitch angle in degrees to prevent flipping upside-down.
+   */
+  static constexpr float kMaxPitchDeg = 85.0f;
 
   /**
    * Updates device parameters, if necessary.
@@ -120,12 +158,25 @@ class HelloCardboardApp {
   /**
    * Gets head's pose as a 4x4 matrix.
    *
+   * In VR mode this queries the Cardboard head tracker.
+   * In finger mode this builds a rotation matrix from touch_yaw_ / touch_pitch_.
+   *
    * @return matrix containing head's pose.
    */
   Matrix4x4 GetPose();
 
   /**
-   * Draws all world-space objects for the given eye.
+   * Builds a rotation-only Matrix4x4 for the given yaw and pitch angles
+   * (in radians). Used exclusively in finger mode.
+   *
+   * @param yaw   Rotation around the Y axis (left/right look), radians.
+   * @param pitch Rotation around the X axis (up/down look), radians.
+   * @return Combined rotation matrix.
+   */
+  Matrix4x4 GetFingerPoseMatrix(float yaw, float pitch);
+
+  /**
+   * Draws all world-space objects for the current eye / finger view.
    */
   void DrawWorld();
 
@@ -153,6 +204,9 @@ class HelloCardboardApp {
    */
   bool IsPointingAtTarget();
 
+  // -------------------------------------------------------------------------
+  // Core Cardboard / Android references
+  // -------------------------------------------------------------------------
   jobject java_asset_mgr_;
   AAssetManager* asset_mgr_;
 
@@ -163,6 +217,9 @@ class HelloCardboardApp {
   CardboardEyeTextureDescription left_eye_texture_description_;
   CardboardEyeTextureDescription right_eye_texture_description_;
 
+  // -------------------------------------------------------------------------
+  // Screen / device state
+  // -------------------------------------------------------------------------
   bool screen_params_changed_;
   bool device_params_changed_;
   int screen_width_;
@@ -171,21 +228,30 @@ class HelloCardboardApp {
   float projection_matrices_[2][16];
   float eye_matrices_[2][16];
 
-  GLuint depthRenderBuffer_;  // depth buffer
-  GLuint framebuffer_;        // framebuffer object
-  GLuint texture_;            // distortion texture
+  // -------------------------------------------------------------------------
+  // OpenGL resources
+  // -------------------------------------------------------------------------
+  GLuint depthRenderBuffer_;
+  GLuint framebuffer_;
+  GLuint texture_;
 
   GLuint obj_program_;
   GLuint obj_position_param_;
   GLuint obj_uv_param_;
   GLuint obj_modelview_projection_param_;
 
+  // -------------------------------------------------------------------------
+  // Scene matrices
+  // -------------------------------------------------------------------------
   Matrix4x4 head_view_;
   Matrix4x4 model_target_;
 
   Matrix4x4 modelview_projection_target_;
   Matrix4x4 modelview_projection_room_;
 
+  // -------------------------------------------------------------------------
+  // Scene geometry
+  // -------------------------------------------------------------------------
   TexturedMesh room_;
   Texture room_tex_;
 
@@ -193,6 +259,25 @@ class HelloCardboardApp {
   std::vector<Texture> target_object_not_selected_textures_;
   std::vector<Texture> target_object_selected_textures_;
   int cur_target_object_;
+
+  // -------------------------------------------------------------------------
+  // Finger mode state
+  // -------------------------------------------------------------------------
+
+  /** True when finger (touch drag) mode is active. */
+  bool finger_mode_;
+
+  /**
+   * Accumulated yaw angle driven by horizontal touch drag, in radians.
+   * Positive = looking right.
+   */
+  float touch_yaw_;
+
+  /**
+   * Accumulated pitch angle driven by vertical touch drag, in radians.
+   * Positive = looking up. Clamped to ±kMaxPitchDeg.
+   */
+  float touch_pitch_;
 };
 
 }  // namespace ndk_hello_cardboard

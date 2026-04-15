@@ -52,6 +52,9 @@ constexpr float kAngleLimit = 0.2f;
 // Number of different possible targets
 constexpr int kTargetMeshCount = 3;
 
+// Degrees-to-radians conversion.
+constexpr float kDegToRad = static_cast<float>(M_PI) / 180.0f;
+
 // Simple shaders to render .obj files without any lighting.
 constexpr const char* kObjVertexShader =
     R"glsl(
@@ -80,6 +83,10 @@ constexpr const char* kObjFragmentShader =
 
 }  // anonymous namespace
 
+// -----------------------------------------------------------------------------
+// Construction / destruction
+// -----------------------------------------------------------------------------
+
 HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
                                      jobject asset_mgr_obj)
     : head_tracker_(nullptr),
@@ -99,7 +106,11 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       target_object_meshes_(kTargetMeshCount),
       target_object_not_selected_textures_(kTargetMeshCount),
       target_object_selected_textures_(kTargetMeshCount),
-      cur_target_object_(RandomUniformInt(kTargetMeshCount)) {
+      cur_target_object_(RandomUniformInt(kTargetMeshCount)),
+      // Finger mode starts disabled; yaw/pitch default to forward-facing (0,0).
+      finger_mode_(false),
+      touch_yaw_(0.0f),
+      touch_pitch_(0.0f) {
   JNIEnv* env;
   vm->GetEnv((void**)&env, JNI_VERSION_1_6);
   java_asset_mgr_ = env->NewGlobalRef(asset_mgr_obj);
@@ -116,6 +127,10 @@ HelloCardboardApp::~HelloCardboardApp() {
   CardboardLensDistortion_destroy(lens_distortion_);
   CardboardDistortionRenderer_destroy(distortion_renderer_);
 }
+
+// -----------------------------------------------------------------------------
+// Surface / screen
+// -----------------------------------------------------------------------------
 
 void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
   const int obj_vertex_shader =
@@ -172,7 +187,65 @@ void HelloCardboardApp::SetScreenParams(int width, int height) {
   screen_params_changed_ = true;
 }
 
+// -----------------------------------------------------------------------------
+// Per-frame rendering
+// -----------------------------------------------------------------------------
+
 void HelloCardboardApp::OnDrawFrame() {
+
+  // ------------------------------------------------------------------
+  // FINGER MODE — single full-screen render, no distortion, no split
+  // ------------------------------------------------------------------
+  if (finger_mode_) {
+    // Get the camera pose from accumulated touch yaw/pitch.
+    head_view_ = GetPose();
+    head_view_ =
+        head_view_ * GetTranslationMatrix({0.0f, kDefaultFloorHeight, 0.0f});
+
+    // Render directly to the default framebuffer (no offscreen FBO).
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screen_width_, screen_height_);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Build a standard perspective projection for a single eye / full screen.
+    // 70° vertical FOV is comfortable for handheld use.
+    const float aspect =
+        static_cast<float>(screen_width_) / static_cast<float>(screen_height_);
+    const float fov_y     = 70.0f * kDegToRad;
+    const float tan_half  = std::tan(fov_y * 0.5f);
+
+    // Column-major perspective matrix (same convention as Cardboard SDK).
+    Matrix4x4 finger_projection;
+    for (int r = 0; r < 4; ++r)
+      for (int c = 0; c < 4; ++c)
+        finger_projection.m[r][c] = 0.0f;
+
+    finger_projection.m[0][0] = 1.0f / (aspect * tan_half);
+    finger_projection.m[1][1] = 1.0f / tan_half;
+    finger_projection.m[2][2] = -(kZFar + kZNear) / (kZFar - kZNear);
+    finger_projection.m[2][3] = -1.0f;
+    finger_projection.m[3][2] = -(2.0f * kZFar * kZNear) / (kZFar - kZNear);
+
+    // No eye offset in finger mode — single centred camera.
+    Matrix4x4 modelview_target   = head_view_ * model_target_;
+    modelview_projection_target_ = finger_projection * modelview_target;
+    modelview_projection_room_   = finger_projection * head_view_;
+
+    DrawWorld();
+
+    CHECKGLERROR("onDrawFrame (finger mode)");
+    return;
+  }
+
+  // ------------------------------------------------------------------
+  // VR MODE — split-screen with Cardboard distortion (original path)
+  // ------------------------------------------------------------------
   if (!UpdateDeviceParams()) {
     return;
   }
@@ -221,16 +294,25 @@ void HelloCardboardApp::OnDrawFrame() {
   CHECKGLERROR("onDrawFrame");
 }
 
+// -----------------------------------------------------------------------------
+// Input events
+// -----------------------------------------------------------------------------
+
 void HelloCardboardApp::OnTriggerEvent() {
   if (IsPointingAtTarget()) {
     HideTarget();
   }
 }
 
-void HelloCardboardApp::OnPause() { CardboardHeadTracker_pause(head_tracker_); }
+void HelloCardboardApp::OnPause() {
+  CardboardHeadTracker_pause(head_tracker_);
+}
 
 void HelloCardboardApp::OnResume() {
-  CardboardHeadTracker_resume(head_tracker_);
+  // Only resume the hardware tracker if we are in VR mode.
+  if (!finger_mode_) {
+    CardboardHeadTracker_resume(head_tracker_);
+  }
 
   // Parameters may have changed.
   device_params_changed_ = true;
@@ -249,6 +331,55 @@ void HelloCardboardApp::OnResume() {
 void HelloCardboardApp::SwitchViewer() {
   CardboardQrCode_scanQrCodeAndSaveDeviceParams();
 }
+
+// -----------------------------------------------------------------------------
+// Finger mode control
+// -----------------------------------------------------------------------------
+
+void HelloCardboardApp::SetFingerMode(bool enabled) {
+  if (finger_mode_ == enabled) return;  // No change, nothing to do.
+
+  finger_mode_ = enabled;
+
+  if (finger_mode_) {
+    // Entering finger mode: pause the IMU-based head tracker and reset the
+    // camera to a neutral forward-facing orientation.
+    CardboardHeadTracker_pause(head_tracker_);
+    touch_yaw_   = 0.0f;
+    touch_pitch_ = 0.0f;
+    LOGD("Finger mode ENABLED — head tracker paused.");
+  } else {
+    // Returning to VR mode: resume the head tracker so sensor fusion restarts.
+    CardboardHeadTracker_resume(head_tracker_);
+    // Force a device-params refresh so the distortion renderer is ready.
+    device_params_changed_ = true;
+    LOGD("Finger mode DISABLED — head tracker resumed.");
+  }
+}
+
+void HelloCardboardApp::OnTouchDrag(float dx, float dy) {
+  if (!finger_mode_) return;
+
+  // Convert pixel deltas to radians.
+  //   dx > 0  → dragging right  → look right → increase yaw
+  //   dy > 0  → dragging down   → look down  → decrease pitch
+  touch_yaw_   += dx * kTouchRotationDegPerPixel * kDegToRad;
+  touch_pitch_ -= dy * kTouchRotationDegPerPixel * kDegToRad;
+
+  // Clamp pitch so the camera cannot flip past straight up or straight down.
+  const float kMaxPitchRad = kMaxPitchDeg * kDegToRad;
+  if (touch_pitch_ >  kMaxPitchRad) touch_pitch_ =  kMaxPitchRad;
+  if (touch_pitch_ < -kMaxPitchRad) touch_pitch_ = -kMaxPitchRad;
+
+  // Wrap yaw to [-π, π] to avoid floating-point drift over time.
+  const float kTwoPi = 2.0f * static_cast<float>(M_PI);
+  while (touch_yaw_ >  static_cast<float>(M_PI)) touch_yaw_ -= kTwoPi;
+  while (touch_yaw_ < -static_cast<float>(M_PI)) touch_yaw_ += kTwoPi;
+}
+
+// -----------------------------------------------------------------------------
+// Device / GL parameter management
+// -----------------------------------------------------------------------------
 
 bool HelloCardboardApp::UpdateDeviceParams() {
   // Checks if screen or device parameters changed
@@ -369,7 +500,17 @@ void HelloCardboardApp::GlTeardown() {
   CHECKGLERROR("GlTeardown");
 }
 
+// -----------------------------------------------------------------------------
+// Pose / camera matrix
+// -----------------------------------------------------------------------------
+
 Matrix4x4 HelloCardboardApp::GetPose() {
+  if (finger_mode_) {
+    // Build pose entirely from accumulated touch yaw and pitch.
+    return GetFingerPoseMatrix(touch_yaw_, touch_pitch_);
+  }
+
+  // Original VR path: query the Cardboard head tracker.
   std::array<float, 4> out_orientation;
   std::array<float, 3> out_position;
   CardboardHeadTracker_getPose(
@@ -378,6 +519,59 @@ Matrix4x4 HelloCardboardApp::GetPose() {
   return GetTranslationMatrix(out_position) *
          Quatf::FromXYZW(&out_orientation[0]).ToMatrix();
 }
+
+Matrix4x4 HelloCardboardApp::GetFingerPoseMatrix(float yaw, float pitch) {
+  // Rotation order: Yaw (Y axis) then Pitch (X axis).
+  // This matches a standard first-person "look around" camera.
+  //
+  // Ry = rotation about Y by yaw
+  // Rx = rotation about X by pitch
+  // pose = Ry * Rx
+
+  const float cy = std::cos(yaw);
+  const float sy = std::sin(yaw);
+  const float cp = std::cos(pitch);
+  const float sp = std::sin(pitch);
+
+  // Ry (column-major):
+  //  [ cy  0  sy  0 ]
+  //  [  0  1   0  0 ]
+  //  [-sy  0  cy  0 ]
+  //  [  0  0   0  1 ]
+  Matrix4x4 ry;
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c)
+      ry.m[r][c] = 0.0f;
+  ry.m[0][0] =  cy;
+  ry.m[0][2] =  sy;
+  ry.m[1][1] =  1.0f;
+  ry.m[2][0] = -sy;
+  ry.m[2][2] =  cy;
+  ry.m[3][3] =  1.0f;
+
+  // Rx (column-major):
+  //  [ 1   0   0  0 ]
+  //  [ 0  cp  -sp  0 ]
+  //  [ 0  sp   cp  0 ]
+  //  [ 0   0    0  1 ]
+  Matrix4x4 rx;
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c)
+      rx.m[r][c] = 0.0f;
+  rx.m[0][0] =  1.0f;
+  rx.m[1][1] =  cp;
+  rx.m[1][2] =  sp;
+  rx.m[2][1] = -sp;
+  rx.m[2][2] =  cp;
+  rx.m[3][3] =  1.0f;
+
+  // Combined: yaw first, then pitch.
+  return ry * rx;
+}
+
+// -----------------------------------------------------------------------------
+// Scene drawing
+// -----------------------------------------------------------------------------
 
 void HelloCardboardApp::DrawWorld() {
   DrawRoom();

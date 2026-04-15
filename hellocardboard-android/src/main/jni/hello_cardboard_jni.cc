@@ -91,4 +91,29 @@ JNI_METHOD(void, nativeSwitchViewer)
   native(native_app)->SwitchViewer();
 }
 
+/**
+ * Enables or disables finger (touch drag) mode.
+ *
+ * @param native_app  Pointer to the HelloCardboardApp instance.
+ * @param enabled     JNI boolean: JNI_TRUE to enter finger mode,
+ *                    JNI_FALSE to return to VR mode.
+ */
+JNI_METHOD(void, nativeSetFingerMode)
+(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jboolean enabled) {
+  native(native_app)->SetFingerMode(enabled == JNI_TRUE);
+}
+
+/**
+ * Forwards a touch drag delta to the native camera controller.
+ * Should only be called while finger mode is active.
+ *
+ * @param native_app  Pointer to the HelloCardboardApp instance.
+ * @param dx          Horizontal drag delta in pixels.
+ * @param dy          Vertical drag delta in pixels.
+ */
+JNI_METHOD(void, nativeOnTouchDrag)
+(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jfloat dx, jfloat dy) {
+  native(native_app)->OnTouchDrag(dx, dy);
+}
+
 }  // extern "C"
