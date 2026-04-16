@@ -56,6 +56,9 @@ constexpr int kTargetMeshCount = 1;
 constexpr float kDegToRad = static_cast<float>(M_PI) / 180.0f;
 
 // Simple shaders to render .obj files without any lighting.
+// The fragment shader samples RGBA so PNG alpha transparency works correctly
+// with the GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA blend that is enabled in
+// OnDrawFrame — transparent pixels in the robot PNG will be invisible.
 constexpr const char* kObjVertexShader =
     R"glsl(
     uniform mat4 u_MVP;
@@ -80,6 +83,27 @@ constexpr const char* kObjFragmentShader =
       // what OpenGL expects, so we invert the y coordinate.
       gl_FragColor = texture2D(u_Texture, vec2(v_UV.x, 1.0 - v_UV.y));
     })glsl";
+
+// ---------------------------------------------------------------------------
+// Billboard helper
+// ---------------------------------------------------------------------------
+// Zeroing out the upper-left 3×3 of a model-view matrix (the rotation block)
+// while leaving the translation column (column 3) intact causes the geometry
+// to always face the camera regardless of head orientation.  This is the
+// classic "spherical billboard" trick; it works in both VR (per-eye) and
+// finger-drag mode because we apply it after multiplying by the view matrix
+// so the world-space position is already baked into the translation column.
+//
+// Matrix layout used throughout this file: m[row][col], row-major math but
+// stored/uploaded column-major for OpenGL via ToGlArray().
+static Matrix4x4 ApplyBillboard(const Matrix4x4& mv) {
+  Matrix4x4 result = mv;
+  // Replace rotation with identity; keep translation (column 3) untouched.
+  result.m[0][0] = 1.0f;  result.m[0][1] = 0.0f;  result.m[0][2] = 0.0f;
+  result.m[1][0] = 0.0f;  result.m[1][1] = 1.0f;  result.m[1][2] = 0.0f;
+  result.m[2][0] = 0.0f;  result.m[2][1] = 0.0f;  result.m[2][2] = 1.0f;
+  return result;
+}
 
 }  // anonymous namespace
 
@@ -156,13 +180,25 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
                                         "CubeRoom.obj", asset_mgr_));
   HELLOCARDBOARD_CHECK(
       room_tex_.Initialize(env, java_asset_mgr_, "CubeRoom_BakedDiffuse.png"));
+
+  // -------------------------------------------------------------------------
+  // BILLBOARD TARGET — replaces the original Icosahedron with a flat quad.
+  //
+  // Steps to add your robot PNG:
+  //   1. Export / save your robot image as a PNG with a transparent background
+  //      (RGBA, not RGB).  The white product-photo background will show as
+  //      a white rectangle; you need actual alpha transparency.
+  //   2. Name the file  robot.png  and drop it in:
+  //        app/src/main/assets/
+  //   3. Rebuild.  Both "not selected" and "selected" states use the same
+  //      texture here; add a second highlighted version later if desired.
+  // -------------------------------------------------------------------------
   HELLOCARDBOARD_CHECK(target_object_meshes_[0].Initialize(
-      obj_position_param_, obj_uv_param_, "Icosahedron.obj", asset_mgr_));
+      obj_position_param_, obj_uv_param_, "RobotBillboard.obj", asset_mgr_));
   HELLOCARDBOARD_CHECK(target_object_not_selected_textures_[0].Initialize(
-      env, java_asset_mgr_, "Icosahedron_Blue_BakedDiffuse.png"));
+      env, java_asset_mgr_, "robot.png"));
   HELLOCARDBOARD_CHECK(target_object_selected_textures_[0].Initialize(
-      env, java_asset_mgr_, "Icosahedron_Pink_BakedDiffuse.png"));
-  
+      env, java_asset_mgr_, "robot.png"));  // swap for a glowing version later
 
   // Target object first appears directly in front of user.
   model_target_ = GetTranslationMatrix({0.0f, 1.5f, kMinTargetDistance});
@@ -221,8 +257,9 @@ void HelloCardboardApp::OnDrawFrame() {
     finger_projection.m[2][3] = -1.0f;
     finger_projection.m[3][2] = -(2.0f * kZFar * kZNear) / (kZFar - kZNear);
 
-    // No eye offset in finger mode — single centred camera.
-    Matrix4x4 modelview_target   = head_view_ * model_target_;
+    // Billboard: cancel view rotation so the quad always faces the camera.
+    Matrix4x4 modelview_target =
+        ApplyBillboard(head_view_ * model_target_);
     modelview_projection_target_ = finger_projection * modelview_target;
     modelview_projection_room_   = finger_projection * head_view_;
 
@@ -266,7 +303,11 @@ void HelloCardboardApp::OnDrawFrame() {
 
     Matrix4x4 projection_matrix =
         GetMatrixFromGlArray(projection_matrices_[eye]);
-    Matrix4x4 modelview_target = eye_view * model_target_;
+
+    // Billboard: apply view transform to get eye-space position, then cancel
+    // the rotation so the quad always faces this eye's camera.
+    Matrix4x4 modelview_target =
+        ApplyBillboard(eye_view * model_target_);
     modelview_projection_target_ = projection_matrix * modelview_target;
     modelview_projection_room_ = projection_matrix * eye_view;
 
@@ -570,6 +611,10 @@ void HelloCardboardApp::DrawWorld() {
 void HelloCardboardApp::DrawTarget() {
   glUseProgram(obj_program_);
 
+  // The billboard is a flat quad — disable back-face culling so it renders
+  // correctly regardless of winding order, then restore for the room.
+  glDisable(GL_CULL_FACE);
+
   std::array<float, 16> target_array = modelview_projection_target_.ToGlArray();
   glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
                      target_array.data());
@@ -580,6 +625,8 @@ void HelloCardboardApp::DrawTarget() {
     target_object_not_selected_textures_[cur_target_object_].Bind();
   }
   target_object_meshes_[cur_target_object_].Draw();
+
+  glEnable(GL_CULL_FACE);  // Restore culling for subsequent room draw.
 
   CHECKGLERROR("DrawTarget");
 }
