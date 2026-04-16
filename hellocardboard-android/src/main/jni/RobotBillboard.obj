@@ -1,0 +1,32 @@
+# RobotBillboard.obj
+# A 1.0m x 1.0m flat quad, centred at the origin, initially facing +Z.
+# The billboard trick in hello_cardboard_app.cc will cancel the camera
+# rotation every frame so this quad always faces the viewer.
+#
+# UV layout accounts for the shader's built-in V-flip:
+#   shader does:  texture2D(u_Texture, vec2(v_UV.x, 1.0 - v_UV.y))
+# so UV.y=0 → image top, UV.y=1 → image bottom.
+#
+# To resize the billboard just scale the v lines uniformly, e.g. multiply
+# x/y coords by 1.5 to get a 1.5 m × 1.5 m sprite.
+
+# Vertices (x, y, z)
+v -0.5 -0.5  0.0
+v  0.5 -0.5  0.0
+v  0.5  0.5  0.0
+v -0.5  0.5  0.0
+
+# Texture coordinates (u, v)
+vt 0.0 1.0
+vt 1.0 1.0
+vt 1.0 0.0
+vt 0.0 0.0
+
+# Normal (facing +Z)
+vn 0.0 0.0 1.0
+
+# Two triangles — counter-clockwise winding (front face toward camera)
+# Triangle 1: bottom-left → bottom-right → top-right
+f 1/1/1 2/2/1 3/3/1
+# Triangle 2: bottom-left → top-right → top-left
+f 1/1/1 3/3/1 4/4/1

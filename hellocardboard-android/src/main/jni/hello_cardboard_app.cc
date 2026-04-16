@@ -25,6 +25,31 @@
 #include <fstream>
 
 #include "cardboard.h"
+#include "robot_animator.h"
+
+// =============================================================================
+// HEADER ADDITIONS REQUIRED  (hello_cardboard_app.h)
+// Add these members to the HelloCardboardApp class:
+//
+//   // --- Robot animator ---
+//   RobotAnimator robot_animator_;
+//
+//   // --- UV sprite-sheet shader uniforms ---
+//   int obj_uv_scale_param_;
+//   int obj_uv_offset_param_;
+//
+//   // --- Delta-time tracking ---
+//   int64_t last_frame_time_nanos_;
+//
+//   // --- Public animation control (called from JNI) ---
+//   void SetRobotState(RobotState state);
+//   void MoveRobotTo(std::array<float,3> target, float duration);
+//
+// Initialise in the constructor member-init list:
+//   obj_uv_scale_param_(0),
+//   obj_uv_offset_param_(0),
+//   last_frame_time_nanos_(0)
+// =============================================================================
 
 namespace ndk_hello_cardboard {
 
@@ -59,15 +84,21 @@ constexpr float kDegToRad = static_cast<float>(M_PI) / 180.0f;
 // The fragment shader samples RGBA so PNG alpha transparency works correctly
 // with the GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA blend that is enabled in
 // OnDrawFrame — transparent pixels in the robot PNG will be invisible.
+// u_UVScale  = (1/cols, 1/rows)  e.g. (0.25, 0.1667) for a 4×6 sheet.
+// u_UVOffset = (col/cols, row/rows) top-left of the current sprite cell.
+// Pass scale=(1,1), offset=(0,0) for a plain single-frame texture (backwards
+// compatible with the original robot.png until the spritesheet is ready).
 constexpr const char* kObjVertexShader =
     R"glsl(
     uniform mat4 u_MVP;
+    uniform vec2 u_UVScale;
+    uniform vec2 u_UVOffset;
     attribute vec4 a_Position;
     attribute vec2 a_UV;
     varying vec2 v_UV;
 
     void main() {
-      v_UV = a_UV;
+      v_UV = a_UV * u_UVScale + u_UVOffset;
       gl_Position = u_MVP * a_Position;
     })glsl";
 
@@ -174,6 +205,10 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
   obj_uv_param_ = glGetAttribLocation(obj_program_, "a_UV");
   obj_modelview_projection_param_ = glGetUniformLocation(obj_program_, "u_MVP");
 
+  // Sprite-sheet UV uniforms (new)
+  obj_uv_scale_param_  = glGetUniformLocation(obj_program_, "u_UVScale");
+  obj_uv_offset_param_ = glGetUniformLocation(obj_program_, "u_UVOffset");
+
   CHECKGLERROR("Obj program params");
 
   HELLOCARDBOARD_CHECK(room_.Initialize(obj_position_param_, obj_uv_param_,
@@ -201,7 +236,9 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
       env, java_asset_mgr_, "robot.png"));  // swap for a glowing version later
 
   // Target object first appears directly in front of user.
-  model_target_ = GetTranslationMatrix({0.0f, 1.5f, kMinTargetDistance});
+  // Position is owned by robot_animator_; read it back so both stay in sync.
+  auto init_pos = robot_animator_.GetCurrentPosition();
+  model_target_ = GetTranslationMatrix({init_pos[0], init_pos[1], init_pos[2]});
 
   CHECKGLERROR("OnSurfaceCreated");
 }
@@ -217,6 +254,26 @@ void HelloCardboardApp::SetScreenParams(int width, int height) {
 // -----------------------------------------------------------------------------
 
 void HelloCardboardApp::OnDrawFrame() {
+
+  // ------------------------------------------------------------------
+  // DELTA TIME + ROBOT ANIMATOR UPDATE (runs every frame, both modes)
+  // ------------------------------------------------------------------
+  {
+    int64_t now = GetBootTimeNano();
+    float dt = (last_frame_time_nanos_ == 0)
+               ? 0.016f
+               : static_cast<float>(now - last_frame_time_nanos_) * 1e-9f;
+    last_frame_time_nanos_ = now;
+
+    // Clamp dt to avoid huge jumps after pauses/resumes
+    if (dt > 0.1f) dt = 0.1f;
+    robot_animator_.Update(dt);
+
+    // Rebuild model_target_ every frame from animator position + bob
+    auto pos = robot_animator_.GetCurrentPosition();
+    pos[1] += robot_animator_.GetFloatBobOffset();   // add Y bob on top
+    model_target_ = GetTranslationMatrix({pos[0], pos[1], pos[2]});
+  }
 
   // ------------------------------------------------------------------
   // FINGER MODE — single full-screen render, no distortion, no split
@@ -619,6 +676,12 @@ void HelloCardboardApp::DrawTarget() {
   glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
                      target_array.data());
 
+  // Upload sprite-sheet UV transform for the current animation frame.
+  float ox, oy, sx, sy;
+  robot_animator_.GetUVTransform(ox, oy, sx, sy);
+  glUniform2f(obj_uv_scale_param_,  sx, sy);
+  glUniform2f(obj_uv_offset_param_, ox, oy);
+
   if (IsPointingAtTarget()) {
     target_object_selected_textures_[cur_target_object_].Bind();
   } else {
@@ -669,4 +732,43 @@ bool HelloCardboardApp::IsPointingAtTarget() {
   return angle < kAngleLimit;
 }
 
+// -----------------------------------------------------------------------------
+// Robot animation control (called from JNI bridge below)
+// -----------------------------------------------------------------------------
+
+void HelloCardboardApp::SetRobotState(RobotState state) {
+  robot_animator_.SetState(state);
+}
+
+void HelloCardboardApp::MoveRobotTo(std::array<float, 3> target,
+                                     float duration_seconds) {
+  robot_animator_.MoveTo(target, duration_seconds);
+}
+
 }  // namespace ndk_hello_cardboard
+
+// =============================================================================
+// JNI Bridge — Java → C++ robot animation control
+// These extern "C" functions are called from VrActivity.java via JNI.
+// Make sure the package name matches your actual package.
+// =============================================================================
+extern "C" {
+
+JNIEXPORT void JNICALL
+Java_com_google_cardboard_VrActivity_nativeSetRobotState(
+    JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jint state) {
+  auto* app = reinterpret_cast<
+      ndk_hello_cardboard::HelloCardboardApp*>(native_app);
+  app->SetRobotState(static_cast<RobotState>(state));
+}
+
+JNIEXPORT void JNICALL
+Java_com_google_cardboard_VrActivity_nativeMoveRobotTo(
+    JNIEnv* /*env*/, jobject /*obj*/, jlong native_app,
+    jfloat x, jfloat y, jfloat z, jfloat duration) {
+  auto* app = reinterpret_cast<
+      ndk_hello_cardboard::HelloCardboardApp*>(native_app);
+  app->MoveRobotTo({x, y, z}, duration);
+}
+
+}  // extern "C"
