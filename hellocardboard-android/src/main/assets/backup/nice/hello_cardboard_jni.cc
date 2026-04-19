@@ -116,15 +116,12 @@ JNI_METHOD(void, nativeOnTouchDrag)
   native(native_app)->OnTouchDrag(dx, dy);
 }
 
-/**
- * Switches the sprite-sheet pose shown on the robot billboard.
- *
- * @param native_app  Pointer to the HelloCardboardApp instance.
- * @param pose_index  0-11, row-major index into the 4×3 sprite grid.
- */
-JNI_METHOD(void, nativeSetRobotPose)
-(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jint pose_index) {
-  native(native_app)->SetRobotPose(static_cast<int>(pose_index));
+}  // extern "C"
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_google_cardboard_VrActivity_nativeSetRobotPose(
+    JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jint pose_index) {
+  auto* app = reinterpret_cast<ndk_hello_cardboard::HelloCardboardApp*>(native_app);
+  app->SetRobotPose(static_cast<int>(pose_index));
 }
 
-}  // extern "C"

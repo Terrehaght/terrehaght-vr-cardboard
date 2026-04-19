@@ -59,22 +59,15 @@ constexpr float kDegToRad = static_cast<float>(M_PI) / 180.0f;
 // The fragment shader samples RGBA so PNG alpha transparency works correctly
 // with the GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA blend that is enabled in
 // OnDrawFrame — transparent pixels in the robot PNG will be invisible.
-//
-// The vertex shader remaps the mesh's raw [0,1] UVs into the active sprite-
-// sheet cell using the u_UVRect uniform (x=u0, y=v0, z=u1, w=v1).
-// Non-robot geometry (room) passes u_UVRect = (0,0,1,1) so its UVs are
-// unchanged.
 constexpr const char* kObjVertexShader =
     R"glsl(
     uniform mat4 u_MVP;
-    uniform vec4 u_UVRect;   // (u0, v0, u1, v1) — sprite cell rect
     attribute vec4 a_Position;
     attribute vec2 a_UV;
     varying vec2 v_UV;
 
     void main() {
-      // Remap raw UV [0,1] → sprite cell sub-rect
-      v_UV = u_UVRect.xy + a_UV * (u_UVRect.zw - u_UVRect.xy);
+      v_UV = a_UV;
       gl_Position = u_MVP * a_Position;
     })glsl";
 
@@ -134,7 +127,6 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       obj_position_param_(0),
       obj_uv_param_(0),
       obj_modelview_projection_param_(0),
-      obj_uv_rect_param_(-1),
       target_object_meshes_(kTargetMeshCount),
       target_object_not_selected_textures_(kTargetMeshCount),
       target_object_selected_textures_(kTargetMeshCount),
@@ -142,13 +134,7 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       // Finger mode starts disabled; yaw/pitch default to forward-facing (0,0).
       finger_mode_(false),
       touch_yaw_(0.0f),
-      touch_pitch_(0.0f),
-      // Sprite sheet: start on pose 0 (top-left cell, full U=[0,1/4] V=[0,1/3]).
-      sprite_sheet_texture_(0),
-      sprite_u0_(0.0f),
-      sprite_u1_(1.0f / static_cast<float>(kSpriteCols)),
-      sprite_v0_(0.0f),
-      sprite_v1_(1.0f / static_cast<float>(kSpriteRows)) {
+      touch_pitch_(0.0f) {
   JNIEnv* env;
   vm->GetEnv((void**)&env, JNI_VERSION_1_6);
   java_asset_mgr_ = env->NewGlobalRef(asset_mgr_obj);
@@ -187,7 +173,6 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
   obj_position_param_ = glGetAttribLocation(obj_program_, "a_Position");
   obj_uv_param_ = glGetAttribLocation(obj_program_, "a_UV");
   obj_modelview_projection_param_ = glGetUniformLocation(obj_program_, "u_MVP");
-  obj_uv_rect_param_ = glGetUniformLocation(obj_program_, "u_UVRect");
 
   CHECKGLERROR("Obj program params");
 
@@ -210,22 +195,10 @@ void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
   // -------------------------------------------------------------------------
   HELLOCARDBOARD_CHECK(target_object_meshes_[0].Initialize(
       obj_position_param_, obj_uv_param_, "RobotBillboard.obj", asset_mgr_));
-
-  // -------------------------------------------------------------------------
-  // SPRITE SHEET TEXTURE
-  // Load the full 4×3 pose grid as a single RGBA texture.  DrawTarget() will
-  // choose which cell to sample via the u_UVRect uniform (set by SetRobotPose).
-  // Asset path:  app/src/main/assets/flexie_tour_poses_transparent.png
-  // -------------------------------------------------------------------------
-  HELLOCARDBOARD_CHECK(sprite_sheet_texture_.Initialize(
-      env, java_asset_mgr_, "flexie_tour_poses_transparent.png"));
-
-  // Both selected / not-selected states point at the same sprite sheet.
-  // Swap in per-pose highlighted versions later if desired.
   HELLOCARDBOARD_CHECK(target_object_not_selected_textures_[0].Initialize(
-      env, java_asset_mgr_, "flexie_tour_poses_transparent.png"));
+      env, java_asset_mgr_, "robot.png"));
   HELLOCARDBOARD_CHECK(target_object_selected_textures_[0].Initialize(
-      env, java_asset_mgr_, "flexie_tour_poses_transparent.png"));
+      env, java_asset_mgr_, "robot.png"));  // swap for a glowing version later
 
   // Target object first appears directly in front of user.
   model_target_ = GetTranslationMatrix({0.0f, 1.5f, kMinTargetDistance});
@@ -432,31 +405,6 @@ void HelloCardboardApp::OnTouchDrag(float dx, float dy) {
   const float kTwoPi = 2.0f * static_cast<float>(M_PI);
   while (touch_yaw_ >  static_cast<float>(M_PI)) touch_yaw_ -= kTwoPi;
   while (touch_yaw_ < -static_cast<float>(M_PI)) touch_yaw_ += kTwoPi;
-}
-
-// -----------------------------------------------------------------------------
-// Sprite-sheet pose control
-// -----------------------------------------------------------------------------
-
-void HelloCardboardApp::SetRobotPose(int poseIndex) {
-  // Clamp to valid range.
-  if (poseIndex < 0) poseIndex = 0;
-  if (poseIndex >= kSpritePoseCount) poseIndex = kSpritePoseCount - 1;
-
-  // Compute column and row of the cell in the 4×3 grid.
-  const int col = poseIndex % kSpriteCols;
-  const int row = poseIndex / kSpriteCols;
-
-  const float cellW = 1.0f / static_cast<float>(kSpriteCols);
-  const float cellH = 1.0f / static_cast<float>(kSpriteRows);
-
-  sprite_u0_ = col * cellW;
-  sprite_u1_ = sprite_u0_ + cellW;
-  sprite_v0_ = row * cellH;
-  sprite_v1_ = sprite_v0_ + cellH;
-
-  LOGD("SetRobotPose: index=%d  col=%d  row=%d  U=[%.3f,%.3f]  V=[%.3f,%.3f]",
-       poseIndex, col, row, sprite_u0_, sprite_u1_, sprite_v0_, sprite_v1_);
 }
 
 // -----------------------------------------------------------------------------
@@ -671,9 +619,6 @@ void HelloCardboardApp::DrawTarget() {
   glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
                      target_array.data());
 
-  // Set the UV rect to sample only the active pose cell from the sprite sheet.
-  glUniform4f(obj_uv_rect_param_, sprite_u0_, sprite_v0_, sprite_u1_, sprite_v1_);
-
   if (IsPointingAtTarget()) {
     target_object_selected_textures_[cur_target_object_].Bind();
   } else {
@@ -692,9 +637,6 @@ void HelloCardboardApp::DrawRoom() {
   std::array<float, 16> room_array = modelview_projection_room_.ToGlArray();
   glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
                      room_array.data());
-
-  // Room uses the full texture (identity UV rect — no sprite remapping).
-  glUniform4f(obj_uv_rect_param_, 0.0f, 0.0f, 1.0f, 1.0f);
 
   room_tex_.Bind();
   room_.Draw();

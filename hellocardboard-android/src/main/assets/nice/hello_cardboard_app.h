@@ -116,19 +116,6 @@ class HelloCardboardApp {
    */
   void OnTouchDrag(float dx, float dy);
 
-  /**
-   * Switches the robot billboard to display a different pose from the
-   * sprite sheet.
-   *
-   * The sprite sheet is a 4-column × 3-row grid (SPRITE_COLS × SPRITE_ROWS).
-   * poseIndex is a row-major index: 0 = top-left cell, 11 = bottom-right.
-   * The UV rectangle for the selected cell is computed once here and stored
-   * in sprite_u0_, sprite_v0_, sprite_u1_, sprite_v1_ for use in DrawTarget().
-   *
-   * @param poseIndex 0-based index in [0, SPRITE_COLS * SPRITE_ROWS).
-   */
-  void SetRobotPose(int poseIndex);
-
  private:
   /**
    * Default near clip plane z-axis coordinate.
@@ -252,7 +239,6 @@ class HelloCardboardApp {
   GLuint obj_position_param_;
   GLuint obj_uv_param_;
   GLuint obj_modelview_projection_param_;
-  GLint  obj_uv_rect_param_;   // u_UVRect uniform — sprite cell selector
 
   // -------------------------------------------------------------------------
   // Scene matrices
@@ -292,38 +278,6 @@ class HelloCardboardApp {
    * Positive = looking up. Clamped to ±kMaxPitchDeg.
    */
   float touch_pitch_;
-
-  // -------------------------------------------------------------------------
-  // Sprite-sheet pose state
-  // -------------------------------------------------------------------------
-
-  /** Number of columns in the sprite sheet grid. */
-  static constexpr int kSpriteCols = 4;
-
-  /** Number of rows in the sprite sheet grid. */
-  static constexpr int kSpriteRows = 3;
-
-  /** Total number of poses = kSpriteCols * kSpriteRows = 12. */
-  static constexpr int kSpritePoseCount = kSpriteCols * kSpriteRows;
-
-  /**
-   * OpenGL texture handle for the full sprite sheet
-   * (flexie_tour_poses_transparent.png).
-   * Loaded once in OnSurfaceCreated; used every frame in DrawTarget().
-   */
-  Texture sprite_sheet_texture_;
-
-  /**
-   * UV rectangle of the currently selected pose cell within the sprite sheet.
-   * Updated by SetRobotPose(). DrawTarget() passes these to the vertex shader
-   * via a uniform so only the active cell is sampled.
-   *
-   * All four values are in [0, 1] (normalised texture coordinates).
-   */
-  float sprite_u0_;   ///< Left   U of the active cell.
-  float sprite_u1_;   ///< Right  U of the active cell.
-  float sprite_v0_;   ///< Top    V of the active cell (OpenGL origin = bottom).
-  float sprite_v1_;   ///< Bottom V of the active cell.
 };
 
 }  // namespace ndk_hello_cardboard
