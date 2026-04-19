@@ -144,7 +144,7 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       touch_yaw_(0.0f),
       touch_pitch_(0.0f),
       // Sprite sheet: start on pose 0 (top-left cell, full U=[0,1/4] V=[0,1/3]).
-      sprite_sheet_texture_(0),
+      sprite_sheet_texture_(),
       sprite_u0_(0.0f),
       sprite_u1_(1.0f / static_cast<float>(kSpriteCols)),
       sprite_v0_(0.0f),
