@@ -166,7 +166,7 @@ class HelloCardboardApp {
    *
    * @param mvp  Combined model-view-projection matrix for this eye / view.
    */
-  void DrawSphere(const Matrix4x4& mvp);
+  void DrawSphere(Matrix4x4 mvp);
 
   // ---- Core references ----------------------------------------------------
   jobject       java_asset_mgr_;

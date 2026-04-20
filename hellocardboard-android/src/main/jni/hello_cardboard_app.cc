@@ -436,7 +436,7 @@ void HelloCardboardApp::UploadSphereMesh() {
 // Sphere draw
 // ---------------------------------------------------------------------------
 
-void HelloCardboardApp::DrawSphere(const Matrix4x4& mvp) {
+void HelloCardboardApp::DrawSphere(Matrix4x4 mvp) {
   const bool isVideo = (media_mode_ == MediaMode::kVideo);
 
   if (isVideo) {
