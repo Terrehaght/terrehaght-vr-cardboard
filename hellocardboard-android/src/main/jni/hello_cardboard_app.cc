@@ -30,40 +30,36 @@ namespace ndk_hello_cardboard {
 
 namespace {
 
-// The objects are about 1 meter in radius, so the min/max target distance are
-// set so that the objects are always within the room (which is about 5 meters
-// across) and the reticle is always closer than any objects.
+// ---------------------------------------------------------------------------
+// Game-mode constants (unchanged)
+// ---------------------------------------------------------------------------
 constexpr float kMinTargetDistance = 2.5f;
 constexpr float kMaxTargetDistance = 3.5f;
-constexpr float kMinTargetHeight = 0.5f;
-constexpr float kMaxTargetHeight = kMinTargetHeight + 3.0f;
-
+constexpr float kMinTargetHeight   = 0.5f;
+constexpr float kMaxTargetHeight   = kMinTargetHeight + 3.0f;
 constexpr float kDefaultFloorHeight = -1.7f;
-
-// 6 Hz cutoff frequency for the velocity filter of the head tracker.
-constexpr int kVelocityFilterCutoffFrequency = 6;
-
+constexpr int   kVelocityFilterCutoffFrequency = 6;
 constexpr uint64_t kPredictionTimeWithoutVsyncNanos = 50000000;
-
-// Angle threshold for determining whether the controller is pointing at the
-// object.
-constexpr float kAngleLimit = 0.2f;
-
-// Number of different possible targets
-constexpr int kTargetMeshCount = 1;
-
-// Degrees-to-radians conversion.
+constexpr float kAngleLimit      = 0.2f;
+constexpr int   kTargetMeshCount = 1;
 constexpr float kDegToRad = static_cast<float>(M_PI) / 180.0f;
 
-// Simple shaders to render .obj files without any lighting.
-// The fragment shader samples RGBA so PNG alpha transparency works correctly
-// with the GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA blend that is enabled in
-// OnDrawFrame — transparent pixels in the robot PNG will be invisible.
-//
-// The vertex shader remaps the mesh's raw [0,1] UVs into the active sprite-
-// sheet cell using the u_UVRect uniform (x=u0, y=v0, z=u1, w=v1).
-// Non-robot geometry (room) passes u_UVRect = (0,0,1,1) so its UVs are
-// unchanged.
+// ---------------------------------------------------------------------------
+// Sphere geometry constants
+// ---------------------------------------------------------------------------
+// Radius is large enough to fully surround the viewer.
+constexpr float kSphereRadius = 50.0f;
+// Subdivision quality: more stacks/slices = smoother sphere, more vertices.
+constexpr int kSphereStacks = 48;
+constexpr int kSphereSlices = 64;
+
+// ---------------------------------------------------------------------------
+// Shader sources
+// ---------------------------------------------------------------------------
+
+// ---- Standard obj shader (room + robot billboard) -------------------------
+// The vertex shader remaps raw [0,1] UVs into the active sprite-sheet cell
+// via u_UVRect.  For non-robot geometry pass u_UVRect = (0,0,1,1).
 constexpr const char* kObjVertexShader =
     R"glsl(
     uniform mat4 u_MVP;
@@ -73,7 +69,6 @@ constexpr const char* kObjVertexShader =
     varying vec2 v_UV;
 
     void main() {
-      // Remap raw UV [0,1] → sprite cell sub-rect
       v_UV = u_UVRect.xy + a_UV * (u_UVRect.zw - u_UVRect.xy);
       gl_Position = u_MVP * a_Position;
     })glsl";
@@ -81,42 +76,78 @@ constexpr const char* kObjVertexShader =
 constexpr const char* kObjFragmentShader =
     R"glsl(
     precision mediump float;
-
     uniform sampler2D u_Texture;
     varying vec2 v_UV;
 
     void main() {
-      // The y coordinate of this sample's textures is reversed compared to
-      // what OpenGL expects, so we invert the y coordinate.
       gl_FragColor = texture2D(u_Texture, vec2(v_UV.x, 1.0 - v_UV.y));
     })glsl";
 
+// ---- 360 still-image sphere shader (GL_TEXTURE_2D) -----------------------
+// No sprite remapping — UV maps directly over the full equirectangular image.
+constexpr const char* kSphereVertexShader =
+    R"glsl(
+    uniform mat4 u_MVP;
+    attribute vec4 a_Position;
+    attribute vec2 a_UV;
+    varying vec2 v_UV;
+
+    void main() {
+      v_UV = a_UV;
+      gl_Position = u_MVP * a_Position;
+    })glsl";
+
+constexpr const char* kSphereFragmentShader =
+    R"glsl(
+    precision mediump float;
+    uniform sampler2D u_Texture;
+    varying vec2 v_UV;
+
+    void main() {
+      gl_FragColor = texture2D(u_Texture, v_UV);
+    })glsl";
+
+// ---- 360 video sphere shader (GL_TEXTURE_EXTERNAL_OES) -------------------
+// Must use the samplerExternalOES extension and sampler type.
+constexpr const char* kOesSphereVertexShader =
+    R"glsl(
+    uniform mat4 u_MVP;
+    attribute vec4 a_Position;
+    attribute vec2 a_UV;
+    varying vec2 v_UV;
+
+    void main() {
+      v_UV = a_UV;
+      gl_Position = u_MVP * a_Position;
+    })glsl";
+
+constexpr const char* kOesSphereFragmentShader =
+    R"glsl(
+    #extension GL_OES_EGL_image_external : require
+    precision mediump float;
+    uniform samplerExternalOES u_Texture;
+    varying vec2 v_UV;
+
+    void main() {
+      gl_FragColor = texture2D(u_Texture, v_UV);
+    })glsl";
+
 // ---------------------------------------------------------------------------
-// Billboard helper
+// Billboard helper (unchanged)
 // ---------------------------------------------------------------------------
-// Zeroing out the upper-left 3×3 of a model-view matrix (the rotation block)
-// while leaving the translation column (column 3) intact causes the geometry
-// to always face the camera regardless of head orientation.  This is the
-// classic "spherical billboard" trick; it works in both VR (per-eye) and
-// finger-drag mode because we apply it after multiplying by the view matrix
-// so the world-space position is already baked into the translation column.
-//
-// Matrix layout used throughout this file: m[row][col], row-major math but
-// stored/uploaded column-major for OpenGL via ToGlArray().
 static Matrix4x4 ApplyBillboard(const Matrix4x4& mv) {
   Matrix4x4 result = mv;
-  // Replace rotation with identity; keep translation (column 3) untouched.
-  result.m[0][0] = 1.0f;  result.m[0][1] = 0.0f;  result.m[0][2] = 0.0f;
-  result.m[1][0] = 0.0f;  result.m[1][1] = 1.0f;  result.m[1][2] = 0.0f;
-  result.m[2][0] = 0.0f;  result.m[2][1] = 0.0f;  result.m[2][2] = 1.0f;
+  result.m[0][0] = 1.0f; result.m[0][1] = 0.0f; result.m[0][2] = 0.0f;
+  result.m[1][0] = 0.0f; result.m[1][1] = 1.0f; result.m[1][2] = 0.0f;
+  result.m[2][0] = 0.0f; result.m[2][1] = 0.0f; result.m[2][2] = 1.0f;
   return result;
 }
 
 }  // anonymous namespace
 
-// -----------------------------------------------------------------------------
+// =============================================================================
 // Construction / destruction
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
                                      jobject asset_mgr_obj)
@@ -135,20 +166,29 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
       obj_uv_param_(0),
       obj_modelview_projection_param_(0),
       obj_uv_rect_param_(-1),
+      oes_program_(0),
+      oes_position_param_(0),
+      oes_uv_param_(0),
+      oes_mvp_param_(0),
       target_object_meshes_(kTargetMeshCount),
       target_object_not_selected_textures_(kTargetMeshCount),
       target_object_selected_textures_(kTargetMeshCount),
       cur_target_object_(RandomUniformInt(kTargetMeshCount)),
-      // Finger mode starts disabled; yaw/pitch default to forward-facing (0,0).
       finger_mode_(false),
       touch_yaw_(0.0f),
       touch_pitch_(0.0f),
-      // Sprite sheet: start on pose 0 (top-left cell, full U=[0,1/4] V=[0,1/3]).
       sprite_sheet_texture_(),
       sprite_u0_(0.0f),
       sprite_u1_(1.0f / static_cast<float>(kSpriteCols)),
       sprite_v0_(0.0f),
-      sprite_v1_(1.0f / static_cast<float>(kSpriteRows)) {
+      sprite_v1_(1.0f / static_cast<float>(kSpriteRows)),
+      // 360 media
+      media_mode_(MediaMode::kNone),
+      sphere_vbo_(0),
+      sphere_uvo_(0),
+      sphere_ibo_(0),
+      sphere_index_count_(0),
+      video_oes_texture_id_(0) {
   JNIEnv* env;
   vm->GetEnv((void**)&env, JNI_VERSION_1_6);
   java_asset_mgr_ = env->NewGlobalRef(asset_mgr_obj);
@@ -161,87 +201,309 @@ HelloCardboardApp::HelloCardboardApp(JavaVM* vm, jobject obj,
 }
 
 HelloCardboardApp::~HelloCardboardApp() {
+  // Release sphere GPU buffers.
+  if (sphere_vbo_) { glDeleteBuffers(1, &sphere_vbo_); }
+  if (sphere_uvo_) { glDeleteBuffers(1, &sphere_uvo_); }
+  if (sphere_ibo_) { glDeleteBuffers(1, &sphere_ibo_); }
+
+  // Release OES texture.
+  if (video_oes_texture_id_) {
+    glDeleteTextures(1, &video_oes_texture_id_);
+  }
+
+  // Release OES program.
+  if (oes_program_) { glDeleteProgram(oes_program_); }
+
   CardboardHeadTracker_destroy(head_tracker_);
   CardboardLensDistortion_destroy(lens_distortion_);
   CardboardDistortionRenderer_destroy(distortion_renderer_);
 }
 
-// -----------------------------------------------------------------------------
-// Surface / screen
-// -----------------------------------------------------------------------------
+// =============================================================================
+// Surface created
+// =============================================================================
 
 void HelloCardboardApp::OnSurfaceCreated(JNIEnv* env) {
-  const int obj_vertex_shader =
-      LoadGLShader(GL_VERTEX_SHADER, kObjVertexShader);
-  const int obj_fragment_shader =
-      LoadGLShader(GL_FRAGMENT_SHADER, kObjFragmentShader);
+  // ---- Compile the standard object shader (room + robot) ------------------
+  const int obj_vertex_shader   = LoadGLShader(GL_VERTEX_SHADER,   kObjVertexShader);
+  const int obj_fragment_shader = LoadGLShader(GL_FRAGMENT_SHADER, kObjFragmentShader);
 
   obj_program_ = glCreateProgram();
   glAttachShader(obj_program_, obj_vertex_shader);
   glAttachShader(obj_program_, obj_fragment_shader);
   glLinkProgram(obj_program_);
   glUseProgram(obj_program_);
-
   CHECKGLERROR("Obj program");
 
-  obj_position_param_ = glGetAttribLocation(obj_program_, "a_Position");
-  obj_uv_param_ = glGetAttribLocation(obj_program_, "a_UV");
+  obj_position_param_             = glGetAttribLocation(obj_program_,  "a_Position");
+  obj_uv_param_                   = glGetAttribLocation(obj_program_,  "a_UV");
   obj_modelview_projection_param_ = glGetUniformLocation(obj_program_, "u_MVP");
-  obj_uv_rect_param_ = glGetUniformLocation(obj_program_, "u_UVRect");
-
+  obj_uv_rect_param_              = glGetUniformLocation(obj_program_, "u_UVRect");
   CHECKGLERROR("Obj program params");
 
+  // ---- Load game-mode assets (room + game object) -------------------------
+  // These are always loaded so the game scene is available as a fallback even
+  // if the user later calls SetMediaAsset.
   HELLOCARDBOARD_CHECK(room_.Initialize(obj_position_param_, obj_uv_param_,
                                         "CubeRoom.obj", asset_mgr_));
   HELLOCARDBOARD_CHECK(
       room_tex_.Initialize(env, java_asset_mgr_, "CubeRoom_BakedDiffuse.png"));
 
-  // -------------------------------------------------------------------------
-  // BILLBOARD TARGET — replaces the original Icosahedron with a flat quad.
-  //
-  // Steps to add your robot PNG:
-  //   1. Export / save your robot image as a PNG with a transparent background
-  //      (RGBA, not RGB).  The white product-photo background will show as
-  //      a white rectangle; you need actual alpha transparency.
-  //   2. Name the file  robot.png  and drop it in:
-  //        app/src/main/assets/
-  //   3. Rebuild.  Both "not selected" and "selected" states use the same
-  //      texture here; add a second highlighted version later if desired.
-  // -------------------------------------------------------------------------
   HELLOCARDBOARD_CHECK(target_object_meshes_[0].Initialize(
       obj_position_param_, obj_uv_param_, "RobotBillboard.obj", asset_mgr_));
 
-  // -------------------------------------------------------------------------
-  // SPRITE SHEET TEXTURE
-  // Load the full 4×3 pose grid as a single RGBA texture.  DrawTarget() will
-  // choose which cell to sample via the u_UVRect uniform (set by SetRobotPose).
-  // Asset path:  app/src/main/assets/flexie_tour_poses_transparent.png
-  // -------------------------------------------------------------------------
+  // ---- Load robot sprite sheet --------------------------------------------
   HELLOCARDBOARD_CHECK(sprite_sheet_texture_.Initialize(
       env, java_asset_mgr_, "flexie_tour_poses_transparent.png"));
 
-  // Both selected / not-selected states point at the same sprite sheet.
-  // Swap in per-pose highlighted versions later if desired.
   HELLOCARDBOARD_CHECK(target_object_not_selected_textures_[0].Initialize(
       env, java_asset_mgr_, "flexie_tour_poses_transparent.png"));
   HELLOCARDBOARD_CHECK(target_object_selected_textures_[0].Initialize(
       env, java_asset_mgr_, "flexie_tour_poses_transparent.png"));
 
-  // Target object first appears directly in front of user.
+  // Place robot directly in front of the viewer.
   model_target_ = GetTranslationMatrix({0.0f, 1.5f, kMinTargetDistance});
 
   CHECKGLERROR("OnSurfaceCreated");
 }
 
+// =============================================================================
+// Screen params
+// =============================================================================
+
 void HelloCardboardApp::SetScreenParams(int width, int height) {
-  screen_width_ = width;
-  screen_height_ = height;
+  screen_width_          = width;
+  screen_height_         = height;
   screen_params_changed_ = true;
 }
 
-// -----------------------------------------------------------------------------
+// =============================================================================
+// 360 media setup
+// =============================================================================
+
+void HelloCardboardApp::SetMediaAsset(JNIEnv* env,
+                                      const std::string& assetPath,
+                                      bool isVideo) {
+  // Build sphere geometry (only once — reuse the same buffers for image/video).
+  if (sphere_vbo_ == 0) {
+    BuildSphereMesh(kSphereStacks, kSphereSlices);
+    UploadSphereMesh();
+  }
+
+  if (isVideo) {
+    // ---- Video mode: create OES texture, compile OES shader ---------------
+    media_mode_ = MediaMode::kVideo;
+
+    // Generate the OES texture that SurfaceTexture will write to.
+    glGenTextures(1, &video_oes_texture_id_);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, video_oes_texture_id_);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    CHECKGLERROR("Create OES texture");
+
+    // Compile the OES sphere shader (uses samplerExternalOES).
+    const int oes_vert = LoadGLShader(GL_VERTEX_SHADER,   kOesSphereVertexShader);
+    const int oes_frag = LoadGLShader(GL_FRAGMENT_SHADER, kOesSphereFragmentShader);
+    oes_program_ = glCreateProgram();
+    glAttachShader(oes_program_, oes_vert);
+    glAttachShader(oes_program_, oes_frag);
+    glLinkProgram(oes_program_);
+    CHECKGLERROR("OES sphere program");
+
+    oes_position_param_ = glGetAttribLocation(oes_program_,  "a_Position");
+    oes_uv_param_       = glGetAttribLocation(oes_program_,  "a_UV");
+    oes_mvp_param_      = glGetUniformLocation(oes_program_, "u_MVP");
+    CHECKGLERROR("OES sphere params");
+
+    LOGD("SetMediaAsset: video mode — OES texture id=%u path=%s",
+         video_oes_texture_id_, assetPath.c_str());
+
+  } else {
+    // ---- Image mode: load texture from assets, reuse obj shader -----------
+    media_mode_ = MediaMode::kImage;
+
+    // Compile the dedicated 2D sphere shader (no sprite remapping).
+    // We compile a separate minimal program so the sphere draw path is clean.
+    // If you prefer to reuse obj_program_, pass u_UVRect=(0,0,1,1) there.
+    // For clarity we keep a separate program here.
+    //
+    // NOTE: We reuse the obj shader here for simplicity.  The only difference
+    // is we pass u_UVRect = (0, 0, 1, 1) so UVs are not remapped.
+    // The sphere_image_texture_ is loaded below.
+    HELLOCARDBOARD_CHECK(sphere_image_texture_.Initialize(
+        env, java_asset_mgr_, assetPath));
+
+    LOGD("SetMediaAsset: image mode — path=%s", assetPath.c_str());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sphere mesh builder
+// ---------------------------------------------------------------------------
+
+void HelloCardboardApp::BuildSphereMesh(int stacks, int slices) {
+  sphere_vertices_.clear();
+  sphere_uvs_.clear();
+  sphere_indices_.clear();
+
+  // Generate vertices ring by ring (top = +Y pole, bottom = -Y pole).
+  for (int stack = 0; stack <= stacks; ++stack) {
+    const float phi = static_cast<float>(M_PI) *
+                      (static_cast<float>(stack) / static_cast<float>(stacks));
+    const float sinPhi = std::sin(phi);
+    const float cosPhi = std::cos(phi);
+
+    for (int slice = 0; slice <= slices; ++slice) {
+      const float theta = 2.0f * static_cast<float>(M_PI) *
+                          (static_cast<float>(slice) / static_cast<float>(slices));
+      const float sinTheta = std::sin(theta);
+      const float cosTheta = std::cos(theta);
+
+      // Position on the unit sphere × radius.
+      const float x =  cosTheta * sinPhi * kSphereRadius;
+      const float y =  cosPhi           * kSphereRadius;
+      const float z =  sinTheta * sinPhi * kSphereRadius;
+      sphere_vertices_.push_back(x);
+      sphere_vertices_.push_back(y);
+      sphere_vertices_.push_back(z);
+
+      // Equirectangular UV: U = longitude fraction, V = latitude fraction.
+      // U goes 0→1 left-to-right; V goes 0→1 top-to-bottom.
+      const float u = 1.0f - static_cast<float>(slice) / static_cast<float>(slices);
+      const float v =        static_cast<float>(stack) / static_cast<float>(stacks);
+      sphere_uvs_.push_back(u);
+      sphere_uvs_.push_back(v);
+    }
+  }
+
+  // Generate indices (two triangles per quad, winding flipped so normals point
+  // inward — the camera is inside the sphere and must see the inner surface).
+  for (int stack = 0; stack < stacks; ++stack) {
+    for (int slice = 0; slice < slices; ++slice) {
+      const uint16_t tl = static_cast<uint16_t>( stack      * (slices + 1) + slice);
+      const uint16_t tr = static_cast<uint16_t>( stack      * (slices + 1) + slice + 1);
+      const uint16_t bl = static_cast<uint16_t>((stack + 1) * (slices + 1) + slice);
+      const uint16_t br = static_cast<uint16_t>((stack + 1) * (slices + 1) + slice + 1);
+
+      // Flipped winding (inward-facing normals).
+      sphere_indices_.push_back(tl);
+      sphere_indices_.push_back(bl);
+      sphere_indices_.push_back(tr);
+
+      sphere_indices_.push_back(tr);
+      sphere_indices_.push_back(bl);
+      sphere_indices_.push_back(br);
+    }
+  }
+
+  sphere_index_count_ = static_cast<GLsizei>(sphere_indices_.size());
+  LOGD("BuildSphereMesh: %zu vertices, %zu indices",
+       sphere_vertices_.size() / 3, sphere_indices_.size());
+}
+
+void HelloCardboardApp::UploadSphereMesh() {
+  if (sphere_vbo_ == 0) {
+    glGenBuffers(1, &sphere_vbo_);
+    glGenBuffers(1, &sphere_uvo_);
+    glGenBuffers(1, &sphere_ibo_);
+  }
+
+  glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_);
+  glBufferData(GL_ARRAY_BUFFER,
+               sphere_vertices_.size() * sizeof(float),
+               sphere_vertices_.data(), GL_STATIC_DRAW);
+
+  glBindBuffer(GL_ARRAY_BUFFER, sphere_uvo_);
+  glBufferData(GL_ARRAY_BUFFER,
+               sphere_uvs_.size() * sizeof(float),
+               sphere_uvs_.data(), GL_STATIC_DRAW);
+
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphere_ibo_);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+               sphere_indices_.size() * sizeof(uint16_t),
+               sphere_indices_.data(), GL_STATIC_DRAW);
+
+  // Unbind.
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+  CHECKGLERROR("UploadSphereMesh");
+}
+
+// ---------------------------------------------------------------------------
+// Sphere draw
+// ---------------------------------------------------------------------------
+
+void HelloCardboardApp::DrawSphere(const Matrix4x4& mvp) {
+  const bool isVideo = (media_mode_ == MediaMode::kVideo);
+
+  if (isVideo) {
+    // Use OES shader + OES texture.
+    glUseProgram(oes_program_);
+
+    std::array<float, 16> mvp_array = mvp.ToGlArray();
+    glUniformMatrix4fv(oes_mvp_param_, 1, GL_FALSE, mvp_array.data());
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, video_oes_texture_id_);
+
+    GLint tex_uniform = glGetUniformLocation(oes_program_, "u_Texture");
+    glUniform1i(tex_uniform, 0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_);
+    glEnableVertexAttribArray(oes_position_param_);
+    glVertexAttribPointer(oes_position_param_, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, sphere_uvo_);
+    glEnableVertexAttribArray(oes_uv_param_);
+    glVertexAttribPointer(oes_uv_param_, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphere_ibo_);
+    glDrawElements(GL_TRIANGLES, sphere_index_count_, GL_UNSIGNED_SHORT, nullptr);
+
+    glDisableVertexAttribArray(oes_position_param_);
+    glDisableVertexAttribArray(oes_uv_param_);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    CHECKGLERROR("DrawSphere (video)");
+
+  } else {
+    // Use the standard obj shader + GL_TEXTURE_2D.
+    glUseProgram(obj_program_);
+
+    std::array<float, 16> mvp_array = mvp.ToGlArray();
+    glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
+                       mvp_array.data());
+
+    // Full UV rect — no sprite remapping for the sphere.
+    glUniform4f(obj_uv_rect_param_, 0.0f, 0.0f, 1.0f, 1.0f);
+
+    sphere_image_texture_.Bind();
+
+    glBindBuffer(GL_ARRAY_BUFFER, sphere_vbo_);
+    glEnableVertexAttribArray(obj_position_param_);
+    glVertexAttribPointer(obj_position_param_, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, sphere_uvo_);
+    glEnableVertexAttribArray(obj_uv_param_);
+    glVertexAttribPointer(obj_uv_param_, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sphere_ibo_);
+    glDrawElements(GL_TRIANGLES, sphere_index_count_, GL_UNSIGNED_SHORT, nullptr);
+
+    glDisableVertexAttribArray(obj_position_param_);
+    glDisableVertexAttribArray(obj_uv_param_);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    CHECKGLERROR("DrawSphere (image)");
+  }
+}
+
+// =============================================================================
 // Per-frame rendering
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 void HelloCardboardApp::OnDrawFrame() {
 
@@ -249,12 +511,10 @@ void HelloCardboardApp::OnDrawFrame() {
   // FINGER MODE — single full-screen render, no distortion, no split
   // ------------------------------------------------------------------
   if (finger_mode_) {
-    // Get the camera pose from accumulated touch yaw/pitch.
     head_view_ = GetPose();
     head_view_ =
         head_view_ * GetTranslationMatrix({0.0f, kDefaultFloorHeight, 0.0f});
 
-    // Render directly to the default framebuffer (no offscreen FBO).
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, screen_width_, screen_height_);
 
@@ -265,26 +525,21 @@ void HelloCardboardApp::OnDrawFrame() {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // Build a standard perspective projection for a single eye / full screen.
-    // 70° vertical FOV is comfortable for handheld use.
     const float aspect =
         static_cast<float>(screen_width_) / static_cast<float>(screen_height_);
-    const float fov_y     = 70.0f * kDegToRad;
-    const float tan_half  = std::tan(fov_y * 0.5f);
+    const float fov_y    = 70.0f * kDegToRad;
+    const float tan_half = std::tan(fov_y * 0.5f);
 
-    // Column-major perspective matrix (same convention as Cardboard SDK).
     Matrix4x4 finger_projection;
     for (int r = 0; r < 4; ++r)
       for (int c = 0; c < 4; ++c)
         finger_projection.m[r][c] = 0.0f;
-
-    finger_projection.m[0][0] = 1.0f / (aspect * tan_half);
-    finger_projection.m[1][1] = 1.0f / tan_half;
+    finger_projection.m[0][0] =  1.0f / (aspect * tan_half);
+    finger_projection.m[1][1] =  1.0f / tan_half;
     finger_projection.m[2][2] = -(kZFar + kZNear) / (kZFar - kZNear);
     finger_projection.m[2][3] = -1.0f;
     finger_projection.m[3][2] = -(2.0f * kZFar * kZNear) / (kZFar - kZNear);
 
-    // Billboard: cancel view rotation so the quad always faces the camera.
     Matrix4x4 modelview_target =
         ApplyBillboard(head_view_ * model_target_);
     modelview_projection_target_ = finger_projection * modelview_target;
@@ -297,20 +552,16 @@ void HelloCardboardApp::OnDrawFrame() {
   }
 
   // ------------------------------------------------------------------
-  // VR MODE — split-screen with Cardboard distortion (original path)
+  // VR MODE — split-screen with Cardboard distortion
   // ------------------------------------------------------------------
   if (!UpdateDeviceParams()) {
     return;
   }
 
-  // Update Head Pose.
   head_view_ = GetPose();
-
-  // Incorporate the floor height into the head_view
   head_view_ =
       head_view_ * GetTranslationMatrix({0.0f, kDefaultFloorHeight, 0.0f});
 
-  // Bind buffer
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
 
   glEnable(GL_DEPTH_TEST);
@@ -320,45 +571,158 @@ void HelloCardboardApp::OnDrawFrame() {
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  // Draw eyes views
   for (int eye = 0; eye < 2; ++eye) {
     glViewport(eye == kLeft ? 0 : screen_width_ / 2, 0, screen_width_ / 2,
                screen_height_);
 
-    Matrix4x4 eye_matrix = GetMatrixFromGlArray(eye_matrices_[eye]);
-    Matrix4x4 eye_view = eye_matrix * head_view_;
+    Matrix4x4 eye_matrix    = GetMatrixFromGlArray(eye_matrices_[eye]);
+    Matrix4x4 eye_view      = eye_matrix * head_view_;
+    Matrix4x4 projection_matrix = GetMatrixFromGlArray(projection_matrices_[eye]);
 
-    Matrix4x4 projection_matrix =
-        GetMatrixFromGlArray(projection_matrices_[eye]);
-
-    // Billboard: apply view transform to get eye-space position, then cancel
-    // the rotation so the quad always faces this eye's camera.
     Matrix4x4 modelview_target =
         ApplyBillboard(eye_view * model_target_);
     modelview_projection_target_ = projection_matrix * modelview_target;
-    modelview_projection_room_ = projection_matrix * eye_view;
+    modelview_projection_room_   = projection_matrix * eye_view;
 
-    // Draw room and target
     DrawWorld();
   }
 
-  // Render
   CardboardDistortionRenderer_renderEyeToDisplay(
-      distortion_renderer_, /* target_display = */ 0, /* x = */ 0, /* y = */ 0,
-      screen_width_, screen_height_, &left_eye_texture_description_,
+      distortion_renderer_, 0, 0, 0,
+      screen_width_, screen_height_,
+      &left_eye_texture_description_,
       &right_eye_texture_description_);
 
   CHECKGLERROR("onDrawFrame");
 }
 
-// -----------------------------------------------------------------------------
+// =============================================================================
+// DrawWorld / DrawBackground / DrawRobot
+// =============================================================================
+
+void HelloCardboardApp::DrawWorld() {
+  DrawBackground();
+  DrawRobot();
+}
+
+void HelloCardboardApp::DrawBackground() {
+  if (media_mode_ == MediaMode::kNone) {
+    // Default game mode — render the original cube room and game target.
+    DrawRoom();
+    DrawTarget();
+  } else {
+    // 360 media mode — render the equirectangular sphere.
+    // Disable back-face culling: the viewer is inside the sphere, so the
+    // "back" face (from the GPU's perspective) is exactly what we need to see.
+    glDisable(GL_CULL_FACE);
+
+    // The sphere is centred at the origin in world space and is large enough to
+    // surround the viewer, so its model matrix is the identity.  The MVP is
+    // simply projection * view (no separate model translation needed).
+    DrawSphere(modelview_projection_room_);
+
+    // Restore culling for the robot billboard drawn on top.
+    glEnable(GL_CULL_FACE);
+  }
+}
+
+void HelloCardboardApp::DrawRobot() {
+  // The robot billboard is always drawn on top of whatever background is active.
+  glUseProgram(obj_program_);
+  glDisable(GL_CULL_FACE);
+
+  std::array<float, 16> target_array = modelview_projection_target_.ToGlArray();
+  glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
+                     target_array.data());
+
+  // Set sprite UV rect for the currently selected pose.
+  glUniform4f(obj_uv_rect_param_, sprite_u0_, sprite_v0_, sprite_u1_, sprite_v1_);
+
+  if (IsPointingAtTarget()) {
+    target_object_selected_textures_[cur_target_object_].Bind();
+  } else {
+    target_object_not_selected_textures_[cur_target_object_].Bind();
+  }
+  target_object_meshes_[cur_target_object_].Draw();
+
+  glEnable(GL_CULL_FACE);
+  CHECKGLERROR("DrawRobot");
+}
+
+// =============================================================================
+// Game-mode draw helpers (used only when media_mode_ == kNone)
+// =============================================================================
+
+void HelloCardboardApp::DrawTarget() {
+  glUseProgram(obj_program_);
+  glDisable(GL_CULL_FACE);
+
+  std::array<float, 16> target_array = modelview_projection_target_.ToGlArray();
+  glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
+                     target_array.data());
+
+  glUniform4f(obj_uv_rect_param_, sprite_u0_, sprite_v0_, sprite_u1_, sprite_v1_);
+
+  if (IsPointingAtTarget()) {
+    target_object_selected_textures_[cur_target_object_].Bind();
+  } else {
+    target_object_not_selected_textures_[cur_target_object_].Bind();
+  }
+  target_object_meshes_[cur_target_object_].Draw();
+
+  glEnable(GL_CULL_FACE);
+  CHECKGLERROR("DrawTarget");
+}
+
+void HelloCardboardApp::DrawRoom() {
+  glUseProgram(obj_program_);
+
+  std::array<float, 16> room_array = modelview_projection_room_.ToGlArray();
+  glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
+                     room_array.data());
+
+  // Full UV rect for the room texture.
+  glUniform4f(obj_uv_rect_param_, 0.0f, 0.0f, 1.0f, 1.0f);
+
+  room_tex_.Bind();
+  room_.Draw();
+
+  CHECKGLERROR("DrawRoom");
+}
+
+void HelloCardboardApp::HideTarget() {
+  cur_target_object_ = RandomUniformInt(kTargetMeshCount);
+
+  float angle    = RandomUniformFloat(-M_PI, M_PI);
+  float distance = RandomUniformFloat(kMinTargetDistance, kMaxTargetDistance);
+  float height   = RandomUniformFloat(kMinTargetHeight, kMaxTargetHeight);
+  std::array<float, 3> target_position = {
+      std::cos(angle) * distance, height, std::sin(angle) * distance
+  };
+
+  model_target_ = GetTranslationMatrix(target_position);
+}
+
+bool HelloCardboardApp::IsPointingAtTarget() {
+  Matrix4x4 head_from_target = head_view_ * model_target_;
+
+  const std::array<float, 4> unit_quaternion = {0.f, 0.f, 0.f, 1.f};
+  const std::array<float, 4> point_vector    = {0.f, 0.f, -1.f, 0.f};
+  const std::array<float, 4> target_vector   = head_from_target * unit_quaternion;
+
+  float angle = AngleBetweenVectors(point_vector, target_vector);
+  return angle < kAngleLimit;
+}
+
+// =============================================================================
 // Input events
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 void HelloCardboardApp::OnTriggerEvent() {
-  if (IsPointingAtTarget()) {
+  if (media_mode_ == MediaMode::kNone && IsPointingAtTarget()) {
     HideTarget();
   }
+  // In media mode the trigger has no default game effect; extend as needed.
 }
 
 void HelloCardboardApp::OnPause() {
@@ -366,16 +730,11 @@ void HelloCardboardApp::OnPause() {
 }
 
 void HelloCardboardApp::OnResume() {
-  // Only resume the hardware tracker if we are in VR mode.
   if (!finger_mode_) {
     CardboardHeadTracker_resume(head_tracker_);
   }
-
-  // Parameters may have changed.
   device_params_changed_ = true;
 
-  // Check for device parameters existence in external storage. If they're
-  // missing, we must scan a Cardboard QR code and save the obtained parameters.
   uint8_t* buffer;
   int size;
   CardboardQrCode_getSavedDeviceParams(&buffer, &size);
@@ -389,61 +748,50 @@ void HelloCardboardApp::SwitchViewer() {
   CardboardQrCode_scanQrCodeAndSaveDeviceParams();
 }
 
-// -----------------------------------------------------------------------------
-// Finger mode control
-// -----------------------------------------------------------------------------
+// =============================================================================
+// Finger mode
+// =============================================================================
 
 void HelloCardboardApp::SetFingerMode(bool enabled) {
-  if (finger_mode_ == enabled) return;  // No change, nothing to do.
+  if (finger_mode_ == enabled) return;
 
   finger_mode_ = enabled;
 
   if (finger_mode_) {
-    // Entering finger mode: pause the IMU-based head tracker and reset the
-    // camera to a neutral forward-facing orientation.
     CardboardHeadTracker_pause(head_tracker_);
     touch_yaw_   = 0.0f;
     touch_pitch_ = 0.0f;
-    LOGD("Finger mode ENABLED — head tracker paused.");
+    LOGD("Finger mode ENABLED");
   } else {
-    // Returning to VR mode: resume the head tracker so sensor fusion restarts.
     CardboardHeadTracker_resume(head_tracker_);
-    // Force a device-params refresh so the distortion renderer is ready.
     device_params_changed_ = true;
-    LOGD("Finger mode DISABLED — head tracker resumed.");
+    LOGD("Finger mode DISABLED");
   }
 }
 
 void HelloCardboardApp::OnTouchDrag(float dx, float dy) {
   if (!finger_mode_) return;
 
-  // Convert pixel deltas to radians.
-  //   dx > 0  → dragging right  → look right → increase yaw
-  //   dy > 0  → dragging down   → look down  → decrease pitch
   touch_yaw_   += dx * kTouchRotationDegPerPixel * kDegToRad;
   touch_pitch_ -= dy * kTouchRotationDegPerPixel * kDegToRad;
 
-  // Clamp pitch so the camera cannot flip past straight up or straight down.
   const float kMaxPitchRad = kMaxPitchDeg * kDegToRad;
   if (touch_pitch_ >  kMaxPitchRad) touch_pitch_ =  kMaxPitchRad;
   if (touch_pitch_ < -kMaxPitchRad) touch_pitch_ = -kMaxPitchRad;
 
-  // Wrap yaw to [-π, π] to avoid floating-point drift over time.
   const float kTwoPi = 2.0f * static_cast<float>(M_PI);
   while (touch_yaw_ >  static_cast<float>(M_PI)) touch_yaw_ -= kTwoPi;
   while (touch_yaw_ < -static_cast<float>(M_PI)) touch_yaw_ += kTwoPi;
 }
 
-// -----------------------------------------------------------------------------
-// Sprite-sheet pose control
-// -----------------------------------------------------------------------------
+// =============================================================================
+// Sprite-sheet pose
+// =============================================================================
 
 void HelloCardboardApp::SetRobotPose(int poseIndex) {
-  // Clamp to valid range.
   if (poseIndex < 0) poseIndex = 0;
   if (poseIndex >= kSpritePoseCount) poseIndex = kSpritePoseCount - 1;
 
-  // Compute column and row of the cell in the 4×3 grid.
   const int col = poseIndex % kSpriteCols;
   const int row = poseIndex / kSpriteCols;
 
@@ -459,30 +807,27 @@ void HelloCardboardApp::SetRobotPose(int poseIndex) {
        poseIndex, col, row, sprite_u0_, sprite_u1_, sprite_v0_, sprite_v1_);
 }
 
-// -----------------------------------------------------------------------------
-// Device / GL parameter management
-// -----------------------------------------------------------------------------
+// =============================================================================
+// Device / GL parameter management (unchanged)
+// =============================================================================
 
 bool HelloCardboardApp::UpdateDeviceParams() {
-  // Checks if screen or device parameters changed
   if (!screen_params_changed_ && !device_params_changed_) {
     return true;
   }
 
-  // Get saved device parameters
   uint8_t* buffer;
   int size;
   CardboardQrCode_getSavedDeviceParams(&buffer, &size);
 
-  // If there are no parameters saved yet, returns false.
   if (size == 0) {
     return false;
   }
 
   CardboardLensDistortion_destroy(lens_distortion_);
-  lens_distortion_ = CardboardLensDistortion_create(buffer, size, screen_width_,
+  lens_distortion_ = CardboardLensDistortion_create(buffer, size,
+                                                    screen_width_,
                                                     screen_height_);
-
   CardboardQrCode_destroy(buffer);
 
   GlSetup();
@@ -493,30 +838,23 @@ bool HelloCardboardApp::UpdateDeviceParams() {
 
   CardboardMesh left_mesh;
   CardboardMesh right_mesh;
-  CardboardLensDistortion_getDistortionMesh(lens_distortion_, kLeft,
-                                            &left_mesh);
-  CardboardLensDistortion_getDistortionMesh(lens_distortion_, kRight,
-                                            &right_mesh);
+  CardboardLensDistortion_getDistortionMesh(lens_distortion_, kLeft,  &left_mesh);
+  CardboardLensDistortion_getDistortionMesh(lens_distortion_, kRight, &right_mesh);
 
-  CardboardDistortionRenderer_setMesh(distortion_renderer_, &left_mesh, kLeft);
-  CardboardDistortionRenderer_setMesh(distortion_renderer_, &right_mesh,
-                                      kRight);
+  CardboardDistortionRenderer_setMesh(distortion_renderer_, &left_mesh,  kLeft);
+  CardboardDistortionRenderer_setMesh(distortion_renderer_, &right_mesh, kRight);
 
-  // Get eye matrices
-  CardboardLensDistortion_getEyeFromHeadMatrix(lens_distortion_, kLeft,
-                                               eye_matrices_[0]);
-  CardboardLensDistortion_getEyeFromHeadMatrix(lens_distortion_, kRight,
-                                               eye_matrices_[1]);
-  CardboardLensDistortion_getProjectionMatrix(lens_distortion_, kLeft, kZNear,
-                                              kZFar, projection_matrices_[0]);
-  CardboardLensDistortion_getProjectionMatrix(lens_distortion_, kRight, kZNear,
-                                              kZFar, projection_matrices_[1]);
+  CardboardLensDistortion_getEyeFromHeadMatrix(lens_distortion_, kLeft,  eye_matrices_[0]);
+  CardboardLensDistortion_getEyeFromHeadMatrix(lens_distortion_, kRight, eye_matrices_[1]);
+  CardboardLensDistortion_getProjectionMatrix(lens_distortion_, kLeft,
+                                              kZNear, kZFar, projection_matrices_[0]);
+  CardboardLensDistortion_getProjectionMatrix(lens_distortion_, kRight,
+                                              kZNear, kZFar, projection_matrices_[1]);
 
   screen_params_changed_ = false;
   device_params_changed_ = false;
 
   CHECKGLERROR("UpdateDeviceParams");
-
   return true;
 }
 
@@ -527,41 +865,37 @@ void HelloCardboardApp::GlSetup() {
     GlTeardown();
   }
 
-  // Create render texture.
   glGenTextures(1, &texture_);
   glBindTexture(GL_TEXTURE_2D, texture_);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, screen_width_, screen_height_,
+               0, GL_RGB, GL_UNSIGNED_BYTE, 0);
 
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, screen_width_, screen_height_, 0,
-               GL_RGB, GL_UNSIGNED_BYTE, 0);
-
-  left_eye_texture_description_.texture = texture_;
-  left_eye_texture_description_.left_u = 0;
-  left_eye_texture_description_.right_u = 0.5;
-  left_eye_texture_description_.top_v = 1;
+  left_eye_texture_description_.texture  = texture_;
+  left_eye_texture_description_.left_u   = 0;
+  left_eye_texture_description_.right_u  = 0.5;
+  left_eye_texture_description_.top_v    = 1;
   left_eye_texture_description_.bottom_v = 0;
 
-  right_eye_texture_description_.texture = texture_;
-  right_eye_texture_description_.left_u = 0.5;
-  right_eye_texture_description_.right_u = 1;
-  right_eye_texture_description_.top_v = 1;
+  right_eye_texture_description_.texture  = texture_;
+  right_eye_texture_description_.left_u   = 0.5;
+  right_eye_texture_description_.right_u  = 1;
+  right_eye_texture_description_.top_v    = 1;
   right_eye_texture_description_.bottom_v = 0;
 
-  // Generate depth buffer to perform depth test.
   glGenRenderbuffers(1, &depthRenderBuffer_);
   glBindRenderbuffer(GL_RENDERBUFFER, depthRenderBuffer_);
-  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, screen_width_,
-                        screen_height_);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16,
+                        screen_width_, screen_height_);
   CHECKGLERROR("Create Render buffer");
 
-  // Create render target.
   glGenFramebuffers(1, &framebuffer_);
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                         texture_, 0);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                         GL_TEXTURE_2D, texture_, 0);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                             GL_RENDERBUFFER, depthRenderBuffer_);
 
@@ -582,17 +916,15 @@ void HelloCardboardApp::GlTeardown() {
   CHECKGLERROR("GlTeardown");
 }
 
-// -----------------------------------------------------------------------------
+// =============================================================================
 // Pose / camera matrix
-// -----------------------------------------------------------------------------
+// =============================================================================
 
 Matrix4x4 HelloCardboardApp::GetPose() {
   if (finger_mode_) {
-    // Build pose entirely from accumulated touch yaw and pitch.
     return GetFingerPoseMatrix(touch_yaw_, touch_pitch_);
   }
 
-  // Original VR path: query the Cardboard head tracker.
   std::array<float, 4> out_orientation;
   std::array<float, 3> out_position;
   CardboardHeadTracker_getPose(
@@ -603,128 +935,30 @@ Matrix4x4 HelloCardboardApp::GetPose() {
 }
 
 Matrix4x4 HelloCardboardApp::GetFingerPoseMatrix(float yaw, float pitch) {
-  // Rotation order: Yaw (Y axis) then Pitch (X axis).
-  // This matches a standard first-person "look around" camera.
-  //
-  // Ry = rotation about Y by yaw
-  // Rx = rotation about X by pitch
-  // pose = Ry * Rx
-
   const float cy = std::cos(yaw);
   const float sy = std::sin(yaw);
   const float cp = std::cos(pitch);
   const float sp = std::sin(pitch);
 
-  // Ry (column-major):
-  //  [ cy  0  sy  0 ]
-  //  [  0  1   0  0 ]
-  //  [-sy  0  cy  0 ]
-  //  [  0  0   0  1 ]
   Matrix4x4 ry;
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 4; ++c)
       ry.m[r][c] = 0.0f;
-  ry.m[0][0] =  cy;
-  ry.m[0][2] =  sy;
+  ry.m[0][0] =  cy; ry.m[0][2] =  sy;
   ry.m[1][1] =  1.0f;
-  ry.m[2][0] = -sy;
-  ry.m[2][2] =  cy;
+  ry.m[2][0] = -sy; ry.m[2][2] =  cy;
   ry.m[3][3] =  1.0f;
 
-  // Rx (column-major):
-  //  [ 1   0   0  0 ]
-  //  [ 0  cp  -sp  0 ]
-  //  [ 0  sp   cp  0 ]
-  //  [ 0   0    0  1 ]
   Matrix4x4 rx;
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 4; ++c)
       rx.m[r][c] = 0.0f;
   rx.m[0][0] =  1.0f;
-  rx.m[1][1] =  cp;
-  rx.m[1][2] =  sp;
-  rx.m[2][1] = -sp;
-  rx.m[2][2] =  cp;
+  rx.m[1][1] =  cp; rx.m[1][2] =  sp;
+  rx.m[2][1] = -sp; rx.m[2][2] =  cp;
   rx.m[3][3] =  1.0f;
 
-  // Combined: yaw first, then pitch.
   return ry * rx;
-}
-
-// -----------------------------------------------------------------------------
-// Scene drawing
-// -----------------------------------------------------------------------------
-
-void HelloCardboardApp::DrawWorld() {
-  DrawRoom();
-  DrawTarget();
-}
-
-void HelloCardboardApp::DrawTarget() {
-  glUseProgram(obj_program_);
-
-  // The billboard is a flat quad — disable back-face culling so it renders
-  // correctly regardless of winding order, then restore for the room.
-  glDisable(GL_CULL_FACE);
-
-  std::array<float, 16> target_array = modelview_projection_target_.ToGlArray();
-  glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
-                     target_array.data());
-
-  // Set the UV rect to sample only the active pose cell from the sprite sheet.
-  glUniform4f(obj_uv_rect_param_, sprite_u0_, sprite_v0_, sprite_u1_, sprite_v1_);
-
-  if (IsPointingAtTarget()) {
-    target_object_selected_textures_[cur_target_object_].Bind();
-  } else {
-    target_object_not_selected_textures_[cur_target_object_].Bind();
-  }
-  target_object_meshes_[cur_target_object_].Draw();
-
-  glEnable(GL_CULL_FACE);  // Restore culling for subsequent room draw.
-
-  CHECKGLERROR("DrawTarget");
-}
-
-void HelloCardboardApp::DrawRoom() {
-  glUseProgram(obj_program_);
-
-  std::array<float, 16> room_array = modelview_projection_room_.ToGlArray();
-  glUniformMatrix4fv(obj_modelview_projection_param_, 1, GL_FALSE,
-                     room_array.data());
-
-  // Room uses the full texture (identity UV rect — no sprite remapping).
-  glUniform4f(obj_uv_rect_param_, 0.0f, 0.0f, 1.0f, 1.0f);
-
-  room_tex_.Bind();
-  room_.Draw();
-
-  CHECKGLERROR("DrawRoom");
-}
-
-void HelloCardboardApp::HideTarget() {
-  cur_target_object_ = RandomUniformInt(kTargetMeshCount);
-
-  float angle = RandomUniformFloat(-M_PI, M_PI);
-  float distance = RandomUniformFloat(kMinTargetDistance, kMaxTargetDistance);
-  float height = RandomUniformFloat(kMinTargetHeight, kMaxTargetHeight);
-  std::array<float, 3> target_position = {std::cos(angle) * distance, height,
-                                          std::sin(angle) * distance};
-
-  model_target_ = GetTranslationMatrix(target_position);
-}
-
-bool HelloCardboardApp::IsPointingAtTarget() {
-  // Compute vectors pointing towards the reticle and towards the target object
-  // in head space.
-  Matrix4x4 head_from_target = head_view_ * model_target_;
-
-  const std::array<float, 4> unit_quaternion = {0.f, 0.f, 0.f, 1.f};
-  const std::array<float, 4> point_vector = {0.f, 0.f, -1.f, 0.f};
-  const std::array<float, 4> target_vector = head_from_target * unit_quaternion;
-
-  float angle = AngleBetweenVectors(point_vector, target_vector);
-  return angle < kAngleLimit;
 }
 
 }  // namespace ndk_hello_cardboard

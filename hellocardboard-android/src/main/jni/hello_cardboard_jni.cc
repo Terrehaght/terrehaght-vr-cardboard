@@ -18,6 +18,7 @@
 #include <jni.h>
 
 #include <memory>
+#include <string>
 
 #include "hello_cardboard_app.h"
 
@@ -45,6 +46,8 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
   javaVm = vm;
   return JNI_VERSION_1_6;
 }
+
+// ---- Core lifecycle --------------------------------------------------------
 
 JNI_METHOD(jlong, nativeOnCreate)
 (JNIEnv* /*env*/, jobject obj, jobject asset_mgr) {
@@ -91,12 +94,13 @@ JNI_METHOD(void, nativeSwitchViewer)
   native(native_app)->SwitchViewer();
 }
 
+// ---- Finger mode -----------------------------------------------------------
+
 /**
  * Enables or disables finger (touch drag) mode.
  *
  * @param native_app  Pointer to the HelloCardboardApp instance.
- * @param enabled     JNI boolean: JNI_TRUE to enter finger mode,
- *                    JNI_FALSE to return to VR mode.
+ * @param enabled     JNI_TRUE to enter finger mode, JNI_FALSE for VR mode.
  */
 JNI_METHOD(void, nativeSetFingerMode)
 (JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jboolean enabled) {
@@ -116,6 +120,8 @@ JNI_METHOD(void, nativeOnTouchDrag)
   native(native_app)->OnTouchDrag(dx, dy);
 }
 
+// ---- Robot pose ------------------------------------------------------------
+
 /**
  * Switches the sprite-sheet pose shown on the robot billboard.
  *
@@ -125,6 +131,52 @@ JNI_METHOD(void, nativeOnTouchDrag)
 JNI_METHOD(void, nativeSetRobotPose)
 (JNIEnv* /*env*/, jobject /*obj*/, jlong native_app, jint pose_index) {
   native(native_app)->SetRobotPose(static_cast<int>(pose_index));
+}
+
+// ---- 360 media -------------------------------------------------------------
+
+/**
+ * Tells the native renderer which 360° equirectangular asset to display.
+ *
+ * For still images (isVideo == false):
+ *   The native side loads the PNG/JPG from assets and maps it onto the inner
+ *   surface of a procedural sphere, replacing the CubeRoom background.
+ *
+ * For videos (isVideo == true):
+ *   The native side creates a GL_TEXTURE_EXTERNAL_OES texture.  Java then
+ *   wraps this texture id in a SurfaceTexture and feeds decoded frames from
+ *   MediaPlayer before each nativeOnDrawFrame call.
+ *
+ * Must be called on the GL thread, i.e. from within onSurfaceCreated in the
+ * GLSurfaceView.Renderer.
+ *
+ * @param native_app  Pointer to the HelloCardboardApp instance.
+ * @param asset_path  Java String: asset-relative path (e.g. "360/scene.mp4").
+ * @param is_video    JNI_TRUE for video, JNI_FALSE for still image.
+ */
+JNI_METHOD(void, nativeSetMediaAsset)
+(JNIEnv* env, jobject /*obj*/, jlong native_app,
+ jstring asset_path, jboolean is_video) {
+  const char* path_chars = env->GetStringUTFChars(asset_path, nullptr);
+  std::string path(path_chars);
+  env->ReleaseStringUTFChars(asset_path, path_chars);
+
+  native(native_app)->SetMediaAsset(env, path, is_video == JNI_TRUE);
+}
+
+/**
+ * Returns the GL_TEXTURE_EXTERNAL_OES texture id created for video mode.
+ *
+ * Java wraps this id in a SurfaceTexture to let MediaPlayer write decoded
+ * frames into it.  Only valid after nativeSetMediaAsset has been called with
+ * isVideo == true.
+ *
+ * @param native_app  Pointer to the HelloCardboardApp instance.
+ * @return            GL texture name, or 0 if not in video mode.
+ */
+JNI_METHOD(jint, nativeGetVideoTextureId)
+(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app) {
+  return static_cast<jint>(native(native_app)->GetVideoTextureId());
 }
 
 }  // extern "C"

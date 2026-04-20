@@ -26,304 +26,243 @@
 #include <vector>
 
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>   // GL_TEXTURE_EXTERNAL_OES
 #include "cardboard.h"
 #include "util.h"
 
 namespace ndk_hello_cardboard {
 
 /**
- * This is a sample app for the Cardboard SDK. It loads a simple environment and
- * objects that you can click on.
+ * Main application class for the Cardboard VR sample.
  *
- * It supports two rendering modes:
- *   - VR Mode (default): Uses CardboardHeadTracker for head pose, renders
- *     split-screen with lens distortion for use inside a Cardboard headset.
- *   - Finger Mode: Uses touch drag input for camera control (yaw/pitch),
- *     renders a single full-screen view with no lens distortion. Designed for
- *     devices without a gyroscope sensor.
+ * Scene modes
+ * -----------
+ *  • Default (game) mode – CubeRoom + game objects + robot billboard.
+ *    Activated when no media asset has been supplied.
+ *
+ *  • 360-image mode – equirectangular sphere with a still PNG/JPG mapped
+ *    on its inner surface + robot billboard on top.
+ *
+ *  • 360-video mode – equirectangular sphere whose texture is an
+ *    GL_TEXTURE_EXTERNAL_OES texture updated each frame by a SurfaceTexture
+ *    driven by Android MediaPlayer (Java side) + robot billboard on top.
+ *
+ * The robot billboard is ALWAYS rendered regardless of scene mode; it sits
+ * on top of whichever background is active.
+ *
+ * Rendering modes
+ * ---------------
+ *  • VR Mode (default): CardboardHeadTracker, split-screen + lens distortion.
+ *  • Finger Mode: touch-drag yaw/pitch, full-screen, no distortion.
  */
 class HelloCardboardApp {
  public:
-  /**
-   * Creates a HelloCardboardApp.
-   *
-   * @param vm JavaVM pointer.
-   * @param obj Android activity object.
-   * @param asset_mgr_obj The asset manager object.
-   */
   HelloCardboardApp(JavaVM* vm, jobject obj, jobject asset_mgr_obj);
-
   ~HelloCardboardApp();
 
-  /**
-   * Initializes any GL-related objects. This should be called on the rendering
-   * thread with a valid GL context.
-   *
-   * @param env The JNI environment.
-   */
+  // ---- Lifecycle ----------------------------------------------------------
   void OnSurfaceCreated(JNIEnv* env);
-
-  /**
-   * Sets screen parameters.
-   *
-   * @param width Screen width
-   * @param height Screen height
-   */
   void SetScreenParams(int width, int height);
-
-  /**
-   * Draws the scene. This should be called on the rendering thread.
-   */
   void OnDrawFrame();
-
-  /**
-   * Hides the target object if it's being targeted.
-   */
   void OnTriggerEvent();
-
-  /**
-   * Pauses head tracking.
-   */
   void OnPause();
-
-  /**
-   * Resumes head tracking.
-   */
   void OnResume();
-
-  /**
-   * Allows user to switch viewer.
-   */
   void SwitchViewer();
 
-  /**
-   * Enables or disables finger (touch drag) mode.
-   *
-   * In finger mode the Cardboard head tracker is paused, lens distortion and
-   * split-screen rendering are disabled, and the camera orientation is driven
-   * entirely by accumulated touch drag deltas.
-   *
-   * @param enabled true to activate finger mode, false to return to VR mode.
-   */
+  // ---- Input --------------------------------------------------------------
   void SetFingerMode(bool enabled);
-
-  /**
-   * Applies an incremental touch drag to update the camera orientation.
-   * Only has an effect when finger mode is active.
-   *
-   * @param dx Horizontal drag delta in pixels (positive = drag right).
-   * @param dy Vertical drag delta in pixels (positive = drag down).
-   */
   void OnTouchDrag(float dx, float dy);
 
-  /**
-   * Switches the robot billboard to display a different pose from the
-   * sprite sheet.
-   *
-   * The sprite sheet is a 4-column × 3-row grid (SPRITE_COLS × SPRITE_ROWS).
-   * poseIndex is a row-major index: 0 = top-left cell, 11 = bottom-right.
-   * The UV rectangle for the selected cell is computed once here and stored
-   * in sprite_u0_, sprite_v0_, sprite_u1_, sprite_v1_ for use in DrawTarget().
-   *
-   * @param poseIndex 0-based index in [0, SPRITE_COLS * SPRITE_ROWS).
-   */
+  // ---- Robot pose ---------------------------------------------------------
   void SetRobotPose(int poseIndex);
 
+  // ---- 360 media ----------------------------------------------------------
+
+  /**
+   * Configures the scene to display a 360° equirectangular asset.
+   *
+   * For still images (isVideo == false):
+   *   Loads the asset PNG/JPG from the asset manager and uploads it as a
+   *   GL_TEXTURE_2D bound to the sphere mesh.  Replaces the CubeRoom.
+   *
+   * For videos (isVideo == true):
+   *   Creates a GL_TEXTURE_EXTERNAL_OES texture name and stores it in
+   *   video_oes_texture_id_.  The Java side wraps this in a SurfaceTexture
+   *   and feeds decoded frames via MediaPlayer.  The sphere samples this
+   *   OES texture each frame via the dedicated OES shader.
+   *
+   * Must be called on the GL thread (from onSurfaceCreated).
+   *
+   * @param env       JNI environment for the GL thread.
+   * @param assetPath Asset-relative path (e.g. "360/my_scene.jpg").
+   * @param isVideo   true = video (OES), false = still image (TEX_2D).
+   */
+  void SetMediaAsset(JNIEnv* env, const std::string& assetPath, bool isVideo);
+
+  /**
+   * Returns the GL_TEXTURE_EXTERNAL_OES texture id created for video mode.
+   * Only valid after SetMediaAsset(..., true) has been called.
+   * Returns 0 if not in video mode.
+   */
+  GLuint GetVideoTextureId() const { return video_oes_texture_id_; }
+
  private:
-  /**
-   * Default near clip plane z-axis coordinate.
-   */
+  // ---- Clip planes --------------------------------------------------------
   static constexpr float kZNear = 0.1f;
+  static constexpr float kZFar  = 100.f;
 
-  /**
-   * Default far clip plane z-axis coordinate.
-   */
-  static constexpr float kZFar = 100.f;
-
-  /**
-   * Sensitivity scalar: degrees of rotation per pixel of drag.
-   * Tune this value to taste (0.15 feels natural on most screen sizes).
-   */
+  // ---- Finger-mode constants ----------------------------------------------
   static constexpr float kTouchRotationDegPerPixel = 0.15f;
+  static constexpr float kMaxPitchDeg              = 85.0f;
 
-  /**
-   * Maximum pitch angle in degrees to prevent flipping upside-down.
-   */
-  static constexpr float kMaxPitchDeg = 85.0f;
+  // ---- Sprite-sheet constants (robot) ------------------------------------
+  static constexpr int kSpriteCols      = 4;
+  static constexpr int kSpriteRows      = 3;
+  static constexpr int kSpritePoseCount = kSpriteCols * kSpriteRows;
 
-  /**
-   * Updates device parameters, if necessary.
-   *
-   * @return true if device parameters were successfully updated.
-   */
-  bool UpdateDeviceParams();
-
-  /**
-   * Initializes GL environment.
-   */
-  void GlSetup();
-
-  /**
-   * Deletes GL environment.
-   */
-  void GlTeardown();
-
-  /**
-   * Gets head's pose as a 4x4 matrix.
-   *
-   * In VR mode this queries the Cardboard head tracker.
-   * In finger mode this builds a rotation matrix from touch_yaw_ / touch_pitch_.
-   *
-   * @return matrix containing head's pose.
-   */
+  // ---- Internal helpers ---------------------------------------------------
+  bool     UpdateDeviceParams();
+  void     GlSetup();
+  void     GlTeardown();
   Matrix4x4 GetPose();
-
-  /**
-   * Builds a rotation-only Matrix4x4 for the given yaw and pitch angles
-   * (in radians). Used exclusively in finger mode.
-   *
-   * @param yaw   Rotation around the Y axis (left/right look), radians.
-   * @param pitch Rotation around the X axis (up/down look), radians.
-   * @return Combined rotation matrix.
-   */
   Matrix4x4 GetFingerPoseMatrix(float yaw, float pitch);
 
-  /**
-   * Draws all world-space objects for the current eye / finger view.
-   */
+  /** Draws the active background (CubeRoom OR 360 sphere). */
+  void DrawBackground();
+
+  /** Draws the robot billboard (always on top of whatever background). */
+  void DrawRobot();
+
+  /** Draws all world objects for the current view. */
   void DrawWorld();
 
-  /**
-   * Draws the target object.
-   */
-  void DrawTarget();
-
-  /**
-   * Draws the room.
-   */
+  // -- Game-mode only -------------------------------------------------------
   void DrawRoom();
-
-  /**
-   * Finds a new random position for the target object.
-   */
+  void DrawTarget();
   void HideTarget();
-
-  /**
-   * Checks if user is pointing or looking at the target object by calculating
-   * whether the angle between the user's gaze and the vector pointing towards
-   * the object is lower than some threshold.
-   *
-   * @return true if the user is pointing at the target object.
-   */
   bool IsPointingAtTarget();
 
-  // -------------------------------------------------------------------------
-  // Core Cardboard / Android references
-  // -------------------------------------------------------------------------
-  jobject java_asset_mgr_;
+  // -- 360-sphere helpers ---------------------------------------------------
+
+  /**
+   * Generates sphere mesh vertices / UVs / indices into sphere_* arrays.
+   * Call once from SetMediaAsset before uploading to GPU.
+   *
+   * @param stacks Number of horizontal rings (latitude bands).
+   * @param slices Number of vertical segments per ring (longitude bands).
+   */
+  void BuildSphereMesh(int stacks, int slices);
+
+  /**
+   * Uploads sphere_vertices_ / sphere_uvs_ / sphere_indices_ to GPU buffers
+   * sphere_vbo_, sphere_uvo_, sphere_ibo_.  Generates buffers if they do not
+   * yet exist.
+   */
+  void UploadSphereMesh();
+
+  /**
+   * Renders the sphere using whichever shader / texture is active for the
+   * current media mode (OES video shader OR standard obj shader for images).
+   *
+   * @param mvp  Combined model-view-projection matrix for this eye / view.
+   */
+  void DrawSphere(const Matrix4x4& mvp);
+
+  // ---- Core references ----------------------------------------------------
+  jobject       java_asset_mgr_;
   AAssetManager* asset_mgr_;
 
-  CardboardHeadTracker* head_tracker_;
-  CardboardLensDistortion* lens_distortion_;
-  CardboardDistortionRenderer* distortion_renderer_;
+  CardboardHeadTracker*         head_tracker_;
+  CardboardLensDistortion*      lens_distortion_;
+  CardboardDistortionRenderer*  distortion_renderer_;
 
   CardboardEyeTextureDescription left_eye_texture_description_;
   CardboardEyeTextureDescription right_eye_texture_description_;
 
-  // -------------------------------------------------------------------------
-  // Screen / device state
-  // -------------------------------------------------------------------------
+  // ---- Screen / device state ----------------------------------------------
   bool screen_params_changed_;
   bool device_params_changed_;
-  int screen_width_;
-  int screen_height_;
+  int  screen_width_;
+  int  screen_height_;
 
   float projection_matrices_[2][16];
   float eye_matrices_[2][16];
 
-  // -------------------------------------------------------------------------
-  // OpenGL resources
-  // -------------------------------------------------------------------------
+  // ---- GL resources (shared framebuffer) ----------------------------------
   GLuint depthRenderBuffer_;
   GLuint framebuffer_;
-  GLuint texture_;
+  GLuint texture_;          ///< Cardboard off-screen render target.
 
+  // ---- Object shader (used for both room and robot billboard) -------------
   GLuint obj_program_;
   GLuint obj_position_param_;
   GLuint obj_uv_param_;
   GLuint obj_modelview_projection_param_;
-  GLint  obj_uv_rect_param_;   // u_UVRect uniform — sprite cell selector
+  GLint  obj_uv_rect_param_;   ///< u_UVRect uniform for sprite-sheet
 
-  // -------------------------------------------------------------------------
-  // Scene matrices
-  // -------------------------------------------------------------------------
+  // ---- OES video shader (used only for video-mode sphere) -----------------
+  GLuint oes_program_;                   ///< Compiled in SetMediaAsset for video.
+  GLuint oes_position_param_;
+  GLuint oes_uv_param_;
+  GLuint oes_mvp_param_;
+
+  // ---- Scene matrices -----------------------------------------------------
   Matrix4x4 head_view_;
   Matrix4x4 model_target_;
-
   Matrix4x4 modelview_projection_target_;
   Matrix4x4 modelview_projection_room_;
 
-  // -------------------------------------------------------------------------
-  // Scene geometry
-  // -------------------------------------------------------------------------
+  // ---- Game-mode geometry (used only when media_mode_ == kNone) -----------
   TexturedMesh room_;
-  Texture room_tex_;
+  Texture      room_tex_;
 
   std::vector<TexturedMesh> target_object_meshes_;
-  std::vector<Texture> target_object_not_selected_textures_;
-  std::vector<Texture> target_object_selected_textures_;
-  int cur_target_object_;
+  std::vector<Texture>      target_object_not_selected_textures_;
+  std::vector<Texture>      target_object_selected_textures_;
+  int                       cur_target_object_;
 
-  // -------------------------------------------------------------------------
-  // Finger mode state
-  // -------------------------------------------------------------------------
-
-  /** True when finger (touch drag) mode is active. */
-  bool finger_mode_;
-
-  /**
-   * Accumulated yaw angle driven by horizontal touch drag, in radians.
-   * Positive = looking right.
-   */
+  // ---- Finger-mode state --------------------------------------------------
+  bool  finger_mode_;
   float touch_yaw_;
-
-  /**
-   * Accumulated pitch angle driven by vertical touch drag, in radians.
-   * Positive = looking up. Clamped to ±kMaxPitchDeg.
-   */
   float touch_pitch_;
 
-  // -------------------------------------------------------------------------
-  // Sprite-sheet pose state
-  // -------------------------------------------------------------------------
-
-  /** Number of columns in the sprite sheet grid. */
-  static constexpr int kSpriteCols = 4;
-
-  /** Number of rows in the sprite sheet grid. */
-  static constexpr int kSpriteRows = 3;
-
-  /** Total number of poses = kSpriteCols * kSpriteRows = 12. */
-  static constexpr int kSpritePoseCount = kSpriteCols * kSpriteRows;
-
-  /**
-   * OpenGL texture handle for the full sprite sheet
-   * (flexie_tour_poses_transparent.png).
-   * Loaded once in OnSurfaceCreated; used every frame in DrawTarget().
-   */
+  // ---- Sprite-sheet pose state (robot) ------------------------------------
   Texture sprite_sheet_texture_;
+  float   sprite_u0_, sprite_u1_, sprite_v0_, sprite_v1_;
 
+  // =========================================================================
+  // 360 media fields
+  // =========================================================================
+
+  /** Identifies which background type is currently active. */
+  enum class MediaMode {
+    kNone,   ///< Default: CubeRoom game scene.
+    kImage,  ///< 360° equirectangular still image on a sphere (GL_TEXTURE_2D).
+    kVideo,  ///< 360° equirectangular video on a sphere (GL_TEXTURE_EXTERNAL_OES).
+  };
+  MediaMode media_mode_;
+
+  // ---- Sphere GPU buffers -------------------------------------------------
+  GLuint sphere_vbo_;   ///< Vertex position buffer.
+  GLuint sphere_uvo_;   ///< UV coordinate buffer.
+  GLuint sphere_ibo_;   ///< Index buffer.
+  GLsizei sphere_index_count_;  ///< Number of indices to draw.
+
+  // CPU-side sphere mesh (built once, uploaded, then may be discarded).
+  std::vector<float>    sphere_vertices_;  ///< x,y,z interleaved.
+  std::vector<float>    sphere_uvs_;       ///< u,v interleaved.
+  std::vector<uint16_t> sphere_indices_;
+
+  // ---- Image-mode texture (GL_TEXTURE_2D) ---------------------------------
+  Texture sphere_image_texture_;
+
+  // ---- Video-mode OES texture ---------------------------------------------
   /**
-   * UV rectangle of the currently selected pose cell within the sprite sheet.
-   * Updated by SetRobotPose(). DrawTarget() passes these to the vertex shader
-   * via a uniform so only the active cell is sampled.
-   *
-   * All four values are in [0, 1] (normalised texture coordinates).
+   * GL_TEXTURE_EXTERNAL_OES texture name.
+   * Created by SetMediaAsset(isVideo=true); Java wraps it in a SurfaceTexture
+   * and calls updateTexImage() each frame before nativeOnDrawFrame.
    */
-  float sprite_u0_;   ///< Left   U of the active cell.
-  float sprite_u1_;   ///< Right  U of the active cell.
-  float sprite_v0_;   ///< Top    V of the active cell (OpenGL origin = bottom).
-  float sprite_v1_;   ///< Bottom V of the active cell.
+  GLuint video_oes_texture_id_;
 };
 
 }  // namespace ndk_hello_cardboard
