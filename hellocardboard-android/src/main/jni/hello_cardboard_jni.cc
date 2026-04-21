@@ -179,4 +179,15 @@ JNI_METHOD(jint, nativeGetVideoTextureId)
   return static_cast<jint>(native(native_app)->GetVideoTextureId());
 }
 
+// ---- Gaze detection --------------------------------------------------------
+
+/**
+ * Returns true if the user is currently looking at the robot billboard.
+ * Safe to call every frame from onDrawFrame.
+ */
+JNI_METHOD(jboolean, nativeIsLookingAtRobot)
+(JNIEnv* /*env*/, jobject /*obj*/, jlong native_app) {
+  return native(native_app)->IsPointingAtTarget() ? JNI_TRUE : JNI_FALSE;
+}
+ 
 }  // extern "C"

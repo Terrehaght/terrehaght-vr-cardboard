@@ -75,7 +75,7 @@ class HelloCardboardApp {
 
   // ---- Robot pose ---------------------------------------------------------
   void SetRobotPose(int poseIndex);
-
+  bool IsPointingAtTarget();
   // ---- 360 media ----------------------------------------------------------
 
   /**
@@ -140,7 +140,7 @@ class HelloCardboardApp {
   void DrawRoom();
   void DrawTarget();
   void HideTarget();
-  bool IsPointingAtTarget();
+  
 
   // -- 360-sphere helpers ---------------------------------------------------
 

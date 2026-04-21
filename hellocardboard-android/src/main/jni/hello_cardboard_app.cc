@@ -964,4 +964,8 @@ Matrix4x4 HelloCardboardApp::GetFingerPoseMatrix(float yaw, float pitch) {
   return ry * rx;
 }
 
+
+
+
+
 }  // namespace ndk_hello_cardboard
