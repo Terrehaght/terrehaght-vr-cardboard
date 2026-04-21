@@ -73,6 +73,9 @@ constexpr const char* kObjVertexShader =
       gl_Position = u_MVP * a_Position;
     })glsl";
 
+// FIX: Removed the erroneous "1.0 - v_UV.y" V-flip that was causing all
+// textures sampled through this shader (including the 360 image sphere)
+// to appear upside down. UVs are now passed straight through to texture2D.
 constexpr const char* kObjFragmentShader =
     R"glsl(
     precision mediump float;
@@ -80,7 +83,7 @@ constexpr const char* kObjFragmentShader =
     varying vec2 v_UV;
 
     void main() {
-      gl_FragColor = texture2D(u_Texture, vec2(v_UV.x, 1.0 - v_UV.y));
+      gl_FragColor = texture2D(u_Texture, v_UV);
     })glsl";
 
 // ---- 360 still-image sphere shader (GL_TEXTURE_2D) -----------------------
