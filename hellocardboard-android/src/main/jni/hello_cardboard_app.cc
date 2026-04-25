@@ -375,7 +375,9 @@ void HelloCardboardApp::BuildSphereMesh(int stacks, int slices) {
 
       // Equirectangular UV: U = longitude fraction, V = latitude fraction.
       // U goes 0→1 left-to-right; V goes 0→1 top-to-bottom.
-      const float u = 1.0f - static_cast<float>(slice) / static_cast<float>(slices);
+      // No U-flip needed: inward-facing winding (flipped triangles) already
+      // handles the inside-sphere orientation without mirroring the texture.
+      const float u = static_cast<float>(slice) / static_cast<float>(slices);
       const float v =        static_cast<float>(stack) / static_cast<float>(stacks);
       sphere_uvs_.push_back(u);
       sphere_uvs_.push_back(v);
